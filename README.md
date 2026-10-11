@@ -80,21 +80,38 @@ INSTALL_TESTSPEED
 
 ```sh
 sudo git clone --depth 1 --branch v0.1.0 https://github.com/lhy8888/testspeed.git /opt/testspeed-src
-cd /opt/testspeed-src
-sudo docker compose up --build --detach
-sudo docker compose logs --follow
+sudo docker compose --project-directory /opt/testspeed-src --file /opt/testspeed-src/compose.yaml up --build --detach
+sudo docker compose --project-directory /opt/testspeed-src --file /opt/testspeed-src/compose.yaml logs --follow
 ```
 
-部署后访问 `http://服务器IP:8080`，同样需要允许 TCP 8080–8084。容器以非 root 用户运行，文件系统只读。停止使用 `cd /opt/testspeed-src && sudo docker compose down`。二进制安装和 Docker 安装选择一种即可，避免占用相同端口。
+部署后访问 `http://服务器IP:8080`，同样需要允许 TCP 8080–8084。容器以非 root 用户运行，文件系统只读。停止使用 `sudo docker compose --project-directory /opt/testspeed-src --file /opt/testspeed-src/compose.yaml down`。二进制安装和 Docker 安装选择一种即可，避免占用相同端口。
 
 更改网页端口时，同时设置实际访问的公开 origin，保证跨端口 CORS 一致：
 
 ```sh
-cd /opt/testspeed-src
-sudo env PORT=9000 PUBLIC_ORIGIN=http://your-server:9000 docker compose up --build --detach
+sudo env PORT=9000 PUBLIC_ORIGIN=http://your-server:9000 docker compose --project-directory /opt/testspeed-src --file /opt/testspeed-src/compose.yaml up --build --detach
 ```
 
 `your-server` 替换为客户端访问的 IP 或域名。数据端口默认仍为 8081–8084；若改变外部映射，应同时配置 `MEASUREMENT_ORIGINS`。
+
+### Compose 提示找不到配置文件
+
+先检查文件，再显式指定配置路径。检出版本标签时出现 detached HEAD 是正常提示，不影响运行。
+
+```sh
+sudo ls -l /opt/testspeed-src/compose.yaml
+sudo docker compose --project-directory /opt/testspeed-src --file /opt/testspeed-src/compose.yaml config --quiet
+```
+
+配置检查通过时没有输出，然后执行上面的启动命令。若显式指定仍失败，记录错误以及以下输出，用于确认 Docker / Compose 安装来源和实际执行路径：
+
+```sh
+sudo docker compose version
+command -v docker
+sudo sh -c 'command -v docker'
+```
+
+Docker 的 Snap 安装可能限制读取 /opt；只有确认使用 Snap 且文件访问被拒绝时，才将源码放到该安装允许访问的目录。不要为此删除已有源码或容器。
 
 ### 从 GitHub 源码编译（可选）
 
