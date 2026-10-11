@@ -10,58 +10,115 @@
 - 默认最多 24 路测速流，页面显示服务端实际观测的 TCP 连接和协议，Mbps/Gbps 自动切换。
 - 可直接提供 HTTP 或 HTTPS；节点协议独立于页面，为后续多节点扩展保留入口。
 
-## 启动
+## 安装与启动
 
-需要 Go **1.27.2** 或更新的正式稳定版。应用本身不需要 Node.js；Node.js 仅用于开发测试。
+### Linux 安装包（推荐，无需 Go / Node.js / Docker）
+
+当前正式版 **v0.1.0**。前端网页已经内嵌在可执行文件中，下载后不需要另找网页目录或安装前端依赖。
+
+- [Linux x86_64 / amd64 安装包](https://github.com/lhy8888/testspeed/releases/download/v0.1.0/testspeed-linux-amd64.tar.gz)
+- [Linux ARM64 安装包](https://github.com/lhy8888/testspeed/releases/download/v0.1.0/testspeed-linux-arm64.tar.gz)
+- [SHA256 校验清单](https://github.com/lhy8888/testspeed/releases/download/v0.1.0/SHA256SUMS)
+- [全部平台安装包 / 最新正式版](https://github.com/lhy8888/testspeed/releases/latest)
+
+适用于使用 systemd 的现代 Linux 服务器，需要 `curl`、`tar`、`sha256sum` 和 sudo 权限。复制下面整段执行，自动选择 x86_64 或 ARM64 包，校验后安装并启动：
 
 ```sh
-go run .
+bash <<'INSTALL_TESTSPEED'
+set -eu
+TESTSPEED_VERSION=v0.1.0
+case "$(uname -m)" in
+  x86_64) TESTSPEED_ARCH=amd64 ;;
+  aarch64|arm64) TESTSPEED_ARCH=arm64 ;;
+  *) echo "请从 GitHub Releases 选择与你的系统匹配的安装包" >&2; exit 1 ;;
+esac
+TESTSPEED_PACKAGE="testspeed-linux-$TESTSPEED_ARCH.tar.gz"
+TESTSPEED_BASE_URL="https://github.com/lhy8888/testspeed/releases/download/$TESTSPEED_VERSION"
+TESTSPEED_DOWNLOAD_DIR="$(mktemp -d)"
+cd "$TESTSPEED_DOWNLOAD_DIR"
+
+curl --fail --location --retry 2 "$TESTSPEED_BASE_URL/$TESTSPEED_PACKAGE" --output "$TESTSPEED_PACKAGE"
+curl --fail --location --retry 2 "$TESTSPEED_BASE_URL/SHA256SUMS" --output SHA256SUMS
+awk -v package="$TESTSPEED_PACKAGE" '$2 == package { print }' SHA256SUMS > SHA256SUMS.selected
+test "$(wc -l < SHA256SUMS.selected)" -eq 1
+sha256sum --check SHA256SUMS.selected
+tar -xzf "$TESTSPEED_PACKAGE"
+
+sudo install -d -m 0755 /opt/testspeed /etc/testspeed
+sudo install -m 0755 testspeed /opt/testspeed/testspeed
+if ! sudo test -e /etc/testspeed/testspeed.env; then
+  sudo install -m 0644 testspeed.env.example /etc/testspeed/testspeed.env
+fi
+sudo install -m 0644 testspeed.service /etc/systemd/system/testspeed.service
+sudo systemctl daemon-reload
+sudo systemctl enable testspeed.service
+sudo systemctl restart testspeed.service
+sudo systemctl --no-pager status testspeed.service
+curl --fail --retry 10 --retry-connrefused --retry-delay 1 http://127.0.0.1:8080/healthz
+INSTALL_TESTSPEED
 ```
 
-网页和控制接口默认监听 `:8080`，同一进程还监听 `8081–8084` 四个 HTTP/1.1 测速端口，形成独立浏览器连接池。部署后访问服务器的 8080 端口，点击「开始测速」；防火墙需同时允许测速端口。企业内网不需要连接外部测速服务。
+默认网页地址：`http://服务器IP:8080`。把“服务器IP”替换为客户端可以访问的 IP 或域名；服务器防火墙和云安全组需允许 **TCP 8080–8084**。8080 提供网页和控制接口，8081–8084 提供独立 HTTP/1.1 测速连接池，仍然是同一台服务器、同一个进程、同一个节点。
 
-若只允许一个端口，可以用 `MEASUREMENT_PORTS='' go run .` 启动。此时为延迟和上传进度保留连接，最多使用 4 路测速流。多个端口仍然是同一台服务器、同一个测速节点。
+| 内容 | 安装位置 / 命令 |
+| --- | --- |
+| 可执行文件（内嵌网页） | `/opt/testspeed/testspeed` |
+| 配置文件 | `/etc/testspeed/testspeed.env` |
+| systemd 服务文件 | `/etc/systemd/system/testspeed.service` |
+| 查看日志 | `sudo journalctl -u testspeed.service -f` |
+| 重启 / 停止 | `sudo systemctl restart testspeed.service` / `sudo systemctl stop testspeed.service` |
 
-### 单文件部署
+修改配置后执行 `sudo systemctl restart testspeed.service`。若只允许一个端口，在配置文件中设置 `MEASUREMENT_PORTS=`，此时最多使用 4 路测速流。服务通过 systemd 动态用户运行，配置文件由服务管理器读取。
+
+更新时修改上述 `TESTSPEED_VERSION` 后重新执行安装命令；二进制会被替换、服务会重启，现有 `/etc/testspeed/testspeed.env` 会保留。无外网的企业内网可先在联网机器下载对应压缩包和 SHA256SUMS，再带入服务器校验并执行安装部分。
+
+如果已经修改 `ADDR` 或启用 HTTPS，更新时把最后一行健康检查地址改为实际监听地址。
+
+### Docker Compose：直接从 GitHub 安装
+
+需要先安装 Docker Engine 和 Compose 插件；源码安装路径为 **/opt/testspeed-src**，不需要宿主机安装 Go 或 Node.js：
 
 ```sh
-mkdir -p bin
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/testspeed .
-./bin/testspeed
+sudo git clone --depth 1 --branch v0.1.0 https://github.com/lhy8888/testspeed.git /opt/testspeed-src
+cd /opt/testspeed-src
+sudo docker compose up --build --detach
+sudo docker compose logs --follow
 ```
 
-只需复制生成的 `testspeed` 可执行文件，网页已经内嵌在其中。跨平台编译可设置 `GOOS` 和 `GOARCH`，例如 `GOOS=linux GOARCH=arm64`。
+部署后访问 `http://服务器IP:8080`，同样需要允许 TCP 8080–8084。容器以非 root 用户运行，文件系统只读。停止使用 `cd /opt/testspeed-src && sudo docker compose down`。二进制安装和 Docker 安装选择一种即可，避免占用相同端口。
 
-### Docker Compose
-
-```sh
-docker compose up --build -d
-docker compose logs -f
-```
-
-默认映射宿主机 `8080–8084`。容器以非 root 用户运行，文件系统只读。关闭服务使用 `docker compose down`。
-
-更改网页端口时，还要设置浏览器实际访问的公开 origin，保证跨端口 CORS 一致，例如：
+更改网页端口时，同时设置实际访问的公开 origin，保证跨端口 CORS 一致：
 
 ```sh
-PORT=9000 PUBLIC_ORIGIN=http://your-server:9000 docker compose up --build -d
+cd /opt/testspeed-src
+sudo env PORT=9000 PUBLIC_ORIGIN=http://your-server:9000 docker compose up --build --detach
 ```
 
 `your-server` 替换为客户端访问的 IP 或域名。数据端口默认仍为 8081–8084；若改变外部映射，应同时配置 `MEASUREMENT_ORIGINS`。
 
-也可以直接构建、启动容器：
+### 从 GitHub 源码编译（可选）
+
+需要 Go **1.27.2** 或更新的正式稳定版，以及 Git。以下命令直接下载仓库、构建并安装到相同的二进制路径：
 
 ```sh
-docker build -t testspeed:local .
-docker run --rm --name testspeed -p 8080-8084:8080-8084 testspeed:local
+TESTSPEED_SOURCE_DIR="$(mktemp -d)"
+git clone --depth 1 --branch v0.1.0 https://github.com/lhy8888/testspeed.git "$TESTSPEED_SOURCE_DIR"
+cd "$TESTSPEED_SOURCE_DIR"
+mkdir -p bin
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/testspeed .
+sudo install -d -m 0755 /opt/testspeed
+sudo install -m 0755 bin/testspeed /opt/testspeed/testspeed
+/opt/testspeed/testspeed
 ```
+
+这是前台运行方式。长期运行时可按安装包教程安装 `deploy/testspeed.service` 和 `deploy/testspeed.env.example`。跨平台编译可设置 `GOOS` 和 `GOARCH`，例如 `GOOS=linux GOARCH=arm64`。
 
 ### HTTPS
 
 公网建议使用可信证书。可由现有反向代理终止 TLS，也可以让应用直接提供 HTTPS：
 
 ```sh
-ADDR=:8443 TLS_CERT_FILE=/path/to/fullchain.pem TLS_KEY_FILE=/path/to/key.pem ./bin/testspeed
+ADDR=:8443 TLS_CERT_FILE=/path/to/fullchain.pem TLS_KEY_FILE=/path/to/key.pem /opt/testspeed/testspeed
 ```
 
 证书和密钥必须同时指定。应用直接提供 TLS 时最低版本为 TLS 1.3，所有数据端口也使用同一证书并固定 HTTP/1.1；网页端口支持 HTTP/2。容器部署时将证书目录只读挂载，并设置环境变量及相应端口映射；文件权限需允许容器用户 `65532:65532` 读取证书和密钥。

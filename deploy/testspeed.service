@@ -1,0 +1,23 @@
+[Unit]
+Description=Testspeed single-node bandwidth measurement
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+User=testspeed
+WorkingDirectory=/opt/testspeed
+EnvironmentFile=-/etc/testspeed/testspeed.env
+ExecStart=/opt/testspeed/testspeed
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=10s
+LimitNOFILE=65536
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

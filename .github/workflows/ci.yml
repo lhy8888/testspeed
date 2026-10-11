@@ -138,6 +138,7 @@ jobs:
           test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' testspeed-ci)" = true
           for attempt in {1..30}; do
             if curl --fail --silent "$BASE_URL/healthz" > "$TEST_ARTIFACT_DIR/health.json"; then break; fi
+            printf 'Waiting for testspeed readiness (%s/30)\n' "$attempt"
             sleep 1
           done
           python3 tools/readiness.py | tee "$TEST_ARTIFACT_DIR/readiness.log"
