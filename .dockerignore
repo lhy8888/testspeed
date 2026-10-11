@@ -1,0 +1,10 @@
+.git
+bin
+artifacts
+node_modules
+tests
+.env
+.env.*
+*.log
+__pycache__
+*.py[cod]

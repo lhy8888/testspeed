@@ -1,0 +1,9 @@
+/bin/
+/artifacts/
+/node_modules/
+/.env
+/.env.*
+!/.env.example
+*.log
+__pycache__/
+*.py[cod]

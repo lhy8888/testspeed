@@ -1,0 +1,28 @@
+services:
+  testspeed:
+    build: .
+    ports:
+      - "${PORT:-8080}:8080"
+      - "8081:8081"
+      - "8082:8082"
+      - "8083:8083"
+      - "8084:8084"
+    environment:
+      ADDR: ":8080"
+      NODE_ID: "node-1"
+      NODE_NAME: "本地节点"
+      MAX_CONCURRENT_TEST_REQUESTS: "128"
+      MEASUREMENT_PORTS: "8081,8082,8083,8084"
+      MAX_TEST_STREAMS: "24"
+      PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:-}"
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"

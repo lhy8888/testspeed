@@ -1,0 +1,160 @@
+name: Build and test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GOTOOLCHAIN: local
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  checks:
+    name: Go race, vet and JavaScript tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.2'
+          cache: false # Standard-library-only module; there is no go.sum.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26.11.1'
+          package-manager-cache: false
+      - name: Check Go formatting
+        run: |
+          unformatted=$(git ls-files -z '*.go' | xargs -0 gofmt -l)
+          if [ -n "$unformatted" ]; then
+            printf 'Run gofmt on:\n%s\n' "$unformatted"
+            exit 1
+          fi
+      - name: Go static analysis
+        run: go vet ./...
+      - name: Go race tests
+        run: go test -race -count=1 ./...
+      - name: JavaScript syntax and unit tests
+        run: |
+          for script in web/*.js tests/*.mjs; do
+            node --check "$script"
+          done
+          node --test tests/*.test.mjs
+
+  cross-build:
+    name: Build ${{ matrix.os }} binaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - os: linux
+            architectures: 'amd64 arm64 386'
+          - os: darwin
+            architectures: 'amd64 arm64'
+          - os: windows
+            architectures: 'amd64 arm64'
+          - os: freebsd
+            architectures: 'amd64'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.2'
+          cache: false
+      - name: Compile application and native throughput client
+        env:
+          GOOS: ${{ matrix.os }}
+          ARCHITECTURES: ${{ matrix.architectures }}
+          CGO_ENABLED: '0'
+        run: |
+          mkdir -p artifacts
+          for architecture in $ARCHITECTURES; do
+            export GOARCH="$architecture"
+            target="testspeed-$GOOS-$GOARCH"
+            mkdir -p "bin/$target"
+            extension=''
+            if [ "$GOOS" = windows ]; then extension='.exe'; fi
+            go build -trimpath -ldflags='-s -w' -o "bin/$target/testspeed$extension" .
+            go build -trimpath -ldflags='-s -w' -o "bin/$target/throughput$extension" ./tools/throughput
+            tar -czf "artifacts/$target.tar.gz" -C "bin/$target" .
+          done
+          sha256sum artifacts/*.tar.gz > artifacts/SHA256SUMS
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binaries-${{ matrix.os }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
+
+  container-browser:
+    name: Scratch container and real Chromium measurements
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BASE_URL: http://127.0.0.1:8080
+      TEST_ARTIFACT_DIR: ${{ github.workspace }}/artifacts/browser
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '26.11.1'
+          package-manager-cache: false
+      - name: Install pinned Playwright and its Chromium
+        run: |
+          npm install --prefix "$RUNNER_TEMP/testspeed-playwright" --no-audit --no-fund --save-exact playwright@1.64.0
+          node "$RUNNER_TEMP/testspeed-playwright/node_modules/playwright/cli.js" install --with-deps chromium
+          printf 'PLAYWRIGHT_MODULE=%s\n' "$RUNNER_TEMP/testspeed-playwright/node_modules/playwright" >> "$GITHUB_ENV"
+      - name: Select the installed Chromium explicitly
+        run: |
+          node -e 'console.log("CHROMIUM_PATH=" + require(process.env.PLAYWRIGHT_MODULE).chromium.executablePath())' >> "$GITHUB_ENV"
+      - name: Build scratch image
+        run: |
+          mkdir -p "$TEST_ARTIFACT_DIR"
+          docker build --tag testspeed:ci . 2>&1 | tee "$TEST_ARTIFACT_DIR/docker-build.log"
+      - name: Start read-only non-root container and check protocol v2
+        run: |
+          docker run --detach --name testspeed-ci --read-only --cap-drop ALL --security-opt no-new-privileges --publish 127.0.0.1:8080-8084:8080-8084 testspeed:ci
+          test "$(docker inspect --format '{{.Config.User}}' testspeed-ci)" = '65532:65532'
+          test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' testspeed-ci)" = true
+          for attempt in {1..30}; do
+            if curl --fail --silent "$BASE_URL/healthz" > "$TEST_ARTIFACT_DIR/health.json"; then break; fi
+            sleep 1
+          done
+          python3 tools/readiness.py | tee "$TEST_ARTIFACT_DIR/readiness.log"
+      - name: Browser flows, concurrency, mobile and cancellation
+        run: node tests/browser-smoke.mjs 2>&1 | tee "$TEST_ARTIFACT_DIR/browser-smoke.log"
+      - name: Browser accuracy at 80, 150 and 300 ms HTTP latency
+        run: node tests/browser-accuracy.mjs 2>&1 | tee "$TEST_ARTIFACT_DIR/browser-accuracy.log"
+      - name: Collect container logs and stop test service
+        if: always()
+        run: |
+          mkdir -p "$TEST_ARTIFACT_DIR"
+          docker logs testspeed-ci > "$TEST_ARTIFACT_DIR/container.log" 2>&1 || true
+          docker rm --force testspeed-ci || true
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: browser-and-container-reports
+          path: artifacts/browser/
+          if-no-files-found: warn
+          retention-days: 14
