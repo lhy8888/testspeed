@@ -181,6 +181,8 @@ jobs:
         run: node tests/browser-websocket.mjs 2>&1 | tee "$TEST_ARTIFACT_DIR/browser-websocket.log"
       - name: Browser interface, language switching and default single-port behavior
         run: node tests/browser-ui.mjs 2>&1 | tee "$TEST_ARTIFACT_DIR/browser-ui.log"
+      - name: Browser IP, locations, pending zero and GeoIP failure handling
+        run: node tests/browser-network-info.mjs 2>&1 | tee "$TEST_ARTIFACT_DIR/browser-network-info.log"
       - name: Browser optional HTTP network reachability and single-port fallback
         env:
           MULTIPORT_BASE_URL: http://127.0.0.1:9480

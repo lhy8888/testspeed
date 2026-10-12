@@ -1,5 +1,5 @@
 import { loadConfig, SpeedTest } from "./speedtest.js";
-import { t, setLanguage, getLanguage, applyLanguageText, onLanguageChange, translateError } from "./i18n.js";
+import { t, setLanguage, getLanguage, applyLanguageText, onLanguageChange, translateError, localizeCountry } from "./i18n.js";
 
 const element = (id) => document.getElementById(id);
 const ui = {
@@ -21,6 +21,8 @@ const ui = {
   rtt: element("rtt-value"), warmup: element("warmup-value"), bdp: element("bdp-value"),
   modeLabel: element("concurrency-mode-label"), bottleneck: element("bottleneck-message"),
   transportMessage: element("transport-message"),
+  clientIp: element("client-ip"), clientLocation: element("client-location"), serverLocation: element("server-location"),
+  clientLocationNote: element("client-location-note"), serverLocationNote: element("server-location-note"),
   more: element("more-details"), moreButton: element("more-info-button"), language: element("language-select"),
 };
 let config = null;
@@ -47,6 +49,7 @@ let transportState = null;
 let runtimeMaxStreams = null;
 let settings = { mode: "manual", streams: 8, durationMs: null };
 let hasSavedSettings = false;
+let networkInfo = { status: "loading", data: null };
 const settingsKey = "light-speed:settings:v3";
 
 try {
@@ -77,17 +80,88 @@ const formatTraffic = (bytes) => {
 
 function setSpeed(kind, value) {
   const target = kind === "download" ? ui.download : ui.upload;
-  target.textContent = speedNumber(value);
-  if (Number.isFinite(value)) target.dataset.mbps = String(value);
+  const measured = Number.isFinite(value) && value >= 0;
+  target.textContent = measured ? speedNumber(value) : "0";
+  target.classList.toggle("is-pending", !measured);
+  if (measured) target.dataset.mbps = String(value);
   else delete target.dataset.mbps;
   (kind === "download" ? ui.downloadUnit : ui.uploadUnit).textContent = speedUnit(value);
   if (kind === "download") {
+    target.classList.toggle("is-settled", measured && downloadComplete);
     ui.download.classList.toggle("compact", target.textContent.length > 5);
     ui.downloadUnitDescription.textContent = t(speedUnit(value) === "Gbps" ? "unitGbpsDescription" : "unitMbpsDescription");
   }
 }
 
 const setDownload = (value) => setSpeed("download", value);
+
+function networkText(value) {
+  return typeof value === "string" ? value.trim().slice(0, 256) : "";
+}
+
+function renderNetworkLocation(subject, target, note, isServer) {
+  if (!target) return;
+  const location = subject?.location;
+  const status = location?.status;
+  let description = "";
+  target.dataset.status = typeof status === "string" ? status : "unavailable";
+  if (status === "resolved") {
+    const label = networkText(location.label);
+    const country = localizeCountry(location.countryCode, networkText(location.country));
+    const parts = [networkText(location.city), networkText(location.region), country].filter(Boolean);
+    const assembled = [...new Set(parts)].join(" · ");
+    const name = location.source === "configured" ? label || assembled : assembled || label;
+    target.textContent = name || t("networkLocationUnavailable");
+    if (name && location.source === "geoip" && location.approximate === true) {
+      description = t(isServer ? "networkServerApproximate" : "networkClientApproximate");
+    }
+  } else if (status === "internal") {
+    const scopeKeys = { private: "networkPrivate", loopback: "networkLoopback", "link-local": "networkLinkLocal", reserved: "networkReserved" };
+    target.textContent = t(scopeKeys[subject?.scope] || "networkPrivate");
+  } else target.textContent = t(status === "disabled" ? "networkLocationDisabled" : "networkLocationUnavailable");
+  if (note) {
+    note.textContent = description;
+    note.hidden = !description;
+  }
+}
+
+function renderNetworkInfo() {
+  if (!ui.clientIp || !ui.clientLocation || !ui.serverLocation) return;
+  if (networkInfo.status !== "ready") {
+    for (const target of [ui.clientIp, ui.clientLocation, ui.serverLocation]) {
+      target.textContent = t(networkInfo.status === "loading" ? "networkLoading" : "networkInfoUnavailable");
+      target.dataset.status = networkInfo.status;
+    }
+    for (const note of [ui.clientLocationNote, ui.serverLocationNote]) if (note) { note.textContent = ""; note.hidden = true; }
+    return;
+  }
+  const { client, server } = networkInfo.data;
+  ui.clientIp.textContent = networkText(client.ip) || t("networkInfoUnavailable");
+  ui.clientIp.dataset.status = client.ip ? "resolved" : "unavailable";
+  ui.clientIp.dataset.scope = networkText(client.scope);
+  ui.clientIp.title = t(client.proxied === true ? "networkForwardedIp" : "networkObservedIp");
+  renderNetworkLocation(client, ui.clientLocation, ui.clientLocationNote, false);
+  renderNetworkLocation(server, ui.serverLocation, ui.serverLocationNote, true);
+}
+
+async function loadNetworkInfo() {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch("/api/network-info", {
+      signal: controller.signal, cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" },
+    });
+    if (!response.ok) throw new Error("Network information unavailable");
+    const data = await response.json();
+    if (!data?.client || !data?.server || typeof data.client !== "object" || typeof data.server !== "object" || Array.isArray(data.client) || Array.isArray(data.server)) throw new Error("Invalid network information");
+    networkInfo = { status: "ready", data };
+  } catch {
+    networkInfo = { status: "unavailable", data: null };
+  } finally {
+    clearTimeout(timer);
+    renderNetworkInfo();
+  }
+}
 
 function configuredMaxStreams() {
   return Math.max(1, Math.min(30, config?.performance?.maxStreams || config?.test?.maxStreams || 30));
@@ -308,7 +382,7 @@ function setRunning(value) {
 }
 
 function resetMetrics() {
-  [ui.download, ui.upload, ui.idle, ui.jitter, ui.downloadLoaded, ui.uploadLoaded, ui.failure, ui.traffic].forEach((item) => { item.textContent = "—"; });
+  [ui.idle, ui.jitter, ui.downloadLoaded, ui.uploadLoaded, ui.failure, ui.traffic].forEach((item) => { item.textContent = "—"; });
   ui.download.classList.remove("compact");
   downloadComplete = false;
   lastDiagnostics = null;
@@ -372,7 +446,7 @@ function onUpdate(update) {
       updateDiagnostics(update);
       setProgress((isDownload ? .05 : .52) + update.progress * .47);
       if (!update.warmingUp) {
-        if (isDownload && !downloadComplete) setDownload(update.mbps);
+        if (isDownload && !downloadComplete) setDownload(update.measuredBytes > 0 ? update.mbps : null);
       }
       if (isDownload) downloadBytes = update.totalBytes;
       else uploadBytes = update.totalBytes;
@@ -546,6 +620,7 @@ function renderLanguage() {
   if (lastError) showError(lastError, errorDuringTransfer);
   drawChart();
   renderPrevious();
+  renderNetworkInfo();
 }
 
 ui.moreButton.addEventListener("click", () => {
@@ -556,7 +631,10 @@ ui.moreButton.addEventListener("click", () => {
 ui.language.addEventListener("change", () => setLanguage(ui.language.value));
 onLanguageChange(renderLanguage);
 
+setSpeed("download", null);
+setSpeed("upload", null);
 renderLanguage();
+void loadNetworkInfo();
 connect().then(() => {
   setStage("idle");
   setStatus("statusIdle");

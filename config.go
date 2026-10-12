@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -33,6 +34,9 @@ type Config struct {
 	MaxTestStreams        int
 	UploadSessionLimit    int
 	TestTransport         string
+	GeoIPEnabled          bool
+	ServerLocation        string
+	TrustedProxies        []netip.Prefix
 }
 
 func loadConfig() (Config, error) {
@@ -49,6 +53,30 @@ func loadConfig() (Config, error) {
 		MaxTestStreams:        30,
 		UploadSessionLimit:    256,
 		TestTransport:         envDefault("TEST_TRANSPORT", "websocket"),
+		GeoIPEnabled:          true,
+		ServerLocation:        strings.TrimSpace(os.Getenv("SERVER_LOCATION")),
+	}
+	if value := os.Getenv("GEOIP_ENABLED"); value != "" {
+		var err error
+		config.GeoIPEnabled, err = strconv.ParseBool(value)
+		if err != nil {
+			return Config{}, fmt.Errorf("GEOIP_ENABLED must be true or false")
+		}
+	}
+	if len(config.ServerLocation) > 256 || strings.ContainsAny(config.ServerLocation, "\r\n") {
+		return Config{}, fmt.Errorf("SERVER_LOCATION must be at most 256 bytes without line breaks")
+	}
+	if value := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES")); value != "" {
+		for _, entry := range strings.Split(value, ",") {
+			prefix, err := netip.ParsePrefix(strings.TrimSpace(entry))
+			if err != nil {
+				return Config{}, fmt.Errorf("TRUSTED_PROXIES must contain valid CIDRs")
+			}
+			if prefix.Addr().Is4In6() {
+				return Config{}, fmt.Errorf("TRUSTED_PROXIES must use IPv4 CIDRs for IPv4-mapped addresses")
+			}
+			config.TrustedProxies = append(config.TrustedProxies, prefix.Masked())
+		}
 	}
 	if config.TestTransport != "websocket" && config.TestTransport != "http" {
 		return Config{}, fmt.Errorf("TEST_TRANSPORT must be websocket or http")

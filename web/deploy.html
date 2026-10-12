@@ -27,7 +27,7 @@
       </aside>
       <main>
         <div class="intro">
-          <p class="eyebrow">部署教程 · v0.1.1</p>
+          <p class="eyebrow">部署教程 · v0.1.2</p>
           <h1>把测速部署到你的服务器</h1>
           <p class="intro-text">一条命令安装，后续更新和维护也使用同一个管理工具。适用于公网和企业内网。</p>
           <div class="default-tags"><span>单端口 8080</span><span>默认 8 路并发</span><span>最多 30 路</span></div>
@@ -38,7 +38,7 @@
           <p>在目标服务器的终端执行。需要 Linux、systemd、sudo 权限，以及访问 GitHub 的网络；无需安装 Go、Node.js 或 Docker。</p>
           <div class="command-block featured">
             <div class="command-heading"><span>首次安装</span><button type="button" class="copy-button" data-copy="install-command" hidden>复制命令</button></div>
-            <pre id="install-command" tabindex="0"><code>curl -fsSL https://raw.githubusercontent.com/lhy8888/testspeed/v0.1.1/deploy/manage.sh | sudo bash -s -- install</code></pre>
+            <pre id="install-command" tabindex="0"><code>curl -fsSL https://raw.githubusercontent.com/lhy8888/testspeed/v0.1.2/deploy/manage.sh | sudo bash -s -- install</code></pre>
             <p class="copy-feedback" role="status" aria-live="polite"></p>
           </div>
           <p>脚本下载并校验安装包，安装网页和服务，创建 systemd 服务并启动。安装后，在浏览器打开：</p>
@@ -81,7 +81,12 @@
         <section id="paths" aria-labelledby="paths-title">
           <h2 id="paths-title">文件在哪里</h2>
           <dl class="path-list"><div><dt>程序与网页</dt><dd><code>/opt/testspeed/testspeed</code></dd></div><div><dt>管理工具</dt><dd><code>/opt/testspeed/manage.sh</code></dd></div><div><dt>服务配置</dt><dd><code>/etc/testspeed/testspeed.env</code></dd></div><div><dt>systemd 服务</dt><dd><code>/etc/systemd/system/testspeed.service</code></dd></div></dl>
-          <p class="small-note">修改配置后重启服务。使用 HTTPS、自定义地址或离线安装时，参照<a href="https://github.com/lhy8888/testspeed/blob/v0.1.1/docs/deployment.md">完整部署文档</a>。</p>
+          <p class="small-note">修改配置后重启服务。使用 HTTPS、自定义地址或离线安装时，参照<a href="https://github.com/lhy8888/testspeed/blob/v0.1.2/docs/deployment.md">完整部署文档</a>。</p>
+          <details class="foldout"><summary>IP 与所在地显示</summary><div class="foldout-body">
+            <p>GeoIP 默认使用 FreeIPAPI 的固定 HTTPS 服务，将公开客户端 IP 发给第三方查询近似网络所在地；私网地址不查询。查询失败不影响测速，结果不代表 GPS 位置。</p>
+            <p>服务器位置可在配置中设置 <code>SERVER_LOCATION=中国·上海</code>；设置 <code>GEOIP_ENABLED=false</code> 可禁用第三方查询。未手动配置时，服务器自动位置只近似反映公网出口。</p>
+            <p class="small-note">反向代理需显式配置 <code>TRUSTED_PROXIES</code>，默认忽略转发头；完整来源校验与额度说明见部署文档。</p>
+          </div></details>
         </section>
 
         <section id="docker" aria-labelledby="docker-title">
@@ -89,23 +94,23 @@
           <p>也可使用 Docker Compose 部署。选择一种部署方式，让网页端口供对应服务使用。</p>
           <details class="foldout"><summary>官方 Docker Engine + Compose</summary><div class="foldout-body">
             <p>需要 Git、Docker Engine 和 Compose 插件。在服务器上执行：</p>
-            <div class="command-block"><div class="command-heading"><span>安装并启动</span><button type="button" class="copy-button" data-copy="docker-command" hidden>复制</button></div><pre id="docker-command" tabindex="0"><code>sudo git clone --depth 1 --branch v0.1.1 https://github.com/lhy8888/testspeed.git /opt/testspeed-src
+            <div class="command-block"><div class="command-heading"><span>安装并启动</span><button type="button" class="copy-button" data-copy="docker-command" hidden>复制</button></div><pre id="docker-command" tabindex="0"><code>sudo git clone --depth 1 --branch v0.1.2 https://github.com/lhy8888/testspeed.git /opt/testspeed-src
 sudo docker compose --project-directory /opt/testspeed-src --file /opt/testspeed-src/compose.yaml up --build --detach
 sudo docker compose --project-directory /opt/testspeed-src --file /opt/testspeed-src/compose.yaml logs --follow</code></pre><p class="copy-feedback" role="status" aria-live="polite"></p></div>
             <p class="small-note">源码目录为 <code>/opt/testspeed-src</code>；已存在该目录时参照完整文档处理。默认网页端口为 8080。</p>
           </div></details>
           <details class="foldout"><summary>Docker 通过 Snap 安装</summary><div class="foldout-body">
             <p>如果 <code>sudo sh -c 'command -v docker'</code> 输出 <code>/snap/bin/docker</code>，源码应放在 Snap 可读取的目录，并同时指定 Snap 配置。</p>
-            <div class="command-block"><div class="command-heading"><span>全新 Snap 部署</span><button type="button" class="copy-button" data-copy="snap-command" hidden>复制</button></div><pre id="snap-command" tabindex="0"><code>sudo git clone --depth 1 --branch v0.1.1 https://github.com/lhy8888/testspeed.git /var/snap/docker/common/testspeed-src
+            <div class="command-block"><div class="command-heading"><span>全新 Snap 部署</span><button type="button" class="copy-button" data-copy="snap-command" hidden>复制</button></div><pre id="snap-command" tabindex="0"><code>sudo git clone --depth 1 --branch v0.1.2 https://github.com/lhy8888/testspeed.git /var/snap/docker/common/testspeed-src
 sudo docker compose --project-directory /var/snap/docker/common/testspeed-src --file /var/snap/docker/common/testspeed-src/compose.yaml --file /var/snap/docker/common/testspeed-src/compose.snap.yaml config --quiet
 sudo docker compose --project-directory /var/snap/docker/common/testspeed-src --file /var/snap/docker/common/testspeed-src/compose.yaml --file /var/snap/docker/common/testspeed-src/compose.snap.yaml up --build --detach</code></pre><p class="copy-feedback" role="status" aria-live="polite"></p></div>
-            <p class="small-note">已经克隆到 <code>/opt</code> 的用户可保留原目录，按<a href="https://github.com/lhy8888/testspeed/blob/v0.1.1/docs/deployment.md">完整部署文档</a>创建副本。使用 Snap 配置无需重装 Docker。</p>
+            <p class="small-note">已经克隆到 <code>/opt</code> 的用户可保留原目录，按<a href="https://github.com/lhy8888/testspeed/blob/v0.1.2/docs/deployment.md">完整部署文档</a>创建副本。使用 Snap 配置无需重装 Docker。</p>
           </div></details>
         </section>
 
         <section id="help" aria-labelledby="help-title">
           <h2 id="help-title">文档与下载</h2>
-          <div class="resource-links"><a href="https://github.com/lhy8888/testspeed/blob/v0.1.1/docs/deployment.md">完整部署文档 <span aria-hidden="true">↗</span></a><a href="https://github.com/lhy8888/testspeed/releases/latest">安装包与校验清单 <span aria-hidden="true">↗</span></a><a href="https://github.com/lhy8888/testspeed">GitHub 仓库 <span aria-hidden="true">↗</span></a></div>
+          <div class="resource-links"><a href="https://github.com/lhy8888/testspeed/blob/v0.1.2/docs/deployment.md">完整部署文档 <span aria-hidden="true">↗</span></a><a href="https://github.com/lhy8888/testspeed/releases/latest">安装包与校验清单 <span aria-hidden="true">↗</span></a><a href="https://github.com/lhy8888/testspeed">GitHub 仓库 <span aria-hidden="true">↗</span></a></div>
           <p class="small-note">企业内网无法访问 GitHub 时，可在联网机器下载对应安装包和 SHA256SUMS，再带入服务器；离线步骤见完整部署文档。</p>
         </section>
         <footer class="page-footer"><span>TESTSPEED · 部署与维护</span><a href="/">返回测速</a></footer>

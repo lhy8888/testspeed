@@ -35,6 +35,7 @@ type speedServer struct {
 	readBuffers      sync.Pool
 	webSockets       socketRegistry
 	preparedDownload map[int]*websocket.PreparedMessage
+	network          *networkService
 }
 
 func newSpeedServer(config Config, web fs.FS) (*speedServer, error) {
@@ -58,6 +59,7 @@ func newSpeedServer(config Config, web fs.FS) (*speedServer, error) {
 		sessions:    &uploadSessions{entries: make(map[string]*uploadSession), limit: limit},
 		runs:        downloadRuns{entries: make(map[string]*downloadRun)},
 		readBuffers: sync.Pool{New: func() any { buffer := make([]byte, 64<<10); return &buffer }},
+		network:     newNetworkService(),
 	}
 	if err := server.prepareWebSocketData(); err != nil {
 		return nil, err
@@ -80,6 +82,10 @@ func (server *speedServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
+	case "/api/network-info":
+		if requireMethod(w, r, http.MethodGet) {
+			server.networkInfo(w, r)
+		}
 	case "/api/ws":
 		if requireMethod(w, r, http.MethodGet) {
 			server.websocket(w, r)

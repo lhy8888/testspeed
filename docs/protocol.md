@@ -29,6 +29,30 @@ GET /api/ping?nonce=<unique>
 
 返回 nodeId 和 RFC3339 serverTime。客户端用单调时钟计算完整 HTTP 响应的往返时间，不使用客户端与服务器墙上时钟差值。
 
+## IP 与网络所在地
+
+`GET /api/network-info` 提供客户端 IP、近似 IP 网络所在地以及服务器所在地。它是独立的元数据接口，不参与下载、上传字节计数和测量窗口；页面异步请求，测速不等待查询结果。
+
+响应为 `{client, server}`：
+
+| 字段 | 含义 |
+| --- | --- |
+| `client.ip`、`client.scope` | 解析后的客户端 IP 及地址类型 |
+| `client.proxied` | 可选，表示使用了已校验的可信代理转发地址 |
+| `client.location` | 近似 GeoIP 或不可查询状态 |
+| `server.name`、`server.ip`、`server.scope` | 节点名称及自动查询观察到的公网出口；未观察到时 `ip` 为空、`scope` 为 unknown |
+| `server.location` | 优先采用手动 `SERVER_LOCATION`，否则使用近似出口 GeoIP |
+
+`scope` 为 `public`、`private`、`loopback`、`link-local`、`reserved` 或 `unknown`。`location` 包含 `country`、`countryCode`（ISO 两字母国家码）、`region`、`city`、`label`、`source`、`status` 和 `approximate`；无可用结果时文本字段可为空。`status` 为 `resolved`、`internal`、`disabled` 或 `unavailable`，`source` 为 `geoip`、`configured`、`network`、`disabled` 或 `unavailable`。
+
+`GEOIP_ENABLED` 默认 true；`SERVER_LOCATION` 和 `TRUSTED_PROXIES` 默认空。手动服务器位置为 `source: configured`，不因该项发起服务器 GeoIP 查询。自动查询仅观察服务器公网出口，不能从 Host、DNS 或 GeoIP 断言物理机房；GeoIP 结果带 `approximate: true`，不是 GPS。
+
+默认仅使用请求连接的 `RemoteAddr`，忽略 `Forwarded` 和 `X-Forwarded-For`。连接对端属于 `TRUSTED_PROXIES` 配置的 IP/CIDR 时，从右向左剥离可信代理，使用首个非可信 IP；同时存在两类头时，计算出的客户端必须一致。头无效、超过 32 跳、超过 8 KiB 或存在歧义时回退连接对端。可信代理应清洗并追加头，不直接信任任意客户端提供的值。
+
+默认服务商为 FreeIPAPI，固定 HTTPS 地址 `https://free.freeipapi.com/api/json/{ip}`，无需认证；用户不能在 API 请求中指定任意查询 URL。只向第三方发送公开客户端 IP，非公开地址不查询。服务器自动查询不带指定 IP，由服务商观察请求出口。FreeIPAPI 额度按公网出口共享，当前为 60 次/分钟；应用每进程最多 45 次/分钟，多个实例共用出口仍可能触发限制。
+
+每次外部查询超时 1.5 秒，最多 4 个并发且不排队；忙时立即返回 unavailable。相同 IP 请求合并，成功缓存 1 小时、失败缓存 60 秒，缓存最多 256 条。收到 429 后按 `Retry-After` 冷却，至少 60 秒、最多 1 小时。配额、冷却、网络或服务商失败使用不可用状态，不生成虚假位置，不阻止测速。缓存有上限且仅保存在内存中，不建立客户端位置历史。
+
 ## WebSocket 传输
 
 同一个网页端口提供以下 HTTP/1.1 Upgrade 路径：
@@ -130,7 +154,7 @@ GET /api/connection-stats?run=<download-run-id>
 
 ## 健康、CORS 与边界
 
-- GET /healthz 返回 status: ok 和 nodeId。
+- GET /healthz 返回 status: ok、nodeId 和 version，正式安装包用 version 精确校验运行版本。
 - 网页端口提供控制接口及 WebSocket，默认不监听额外数据端口；显式配置的数据端口固定 HTTP/1.1，只提供 HTTP 测量接口。
 - 跨 origin 请求只允许规范化的网页 origin；PUBLIC_ORIGIN 和 MEASUREMENT_ORIGINS 可显式配置公开地址。CSP 同时限制页面和 Worker 的连接目标。
 - 方法不匹配返回 405，未知 API 返回 404；不会返回网页代替错误。

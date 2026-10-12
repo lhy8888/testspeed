@@ -22,12 +22,18 @@
     <main class="page-shell">
       <section class="hero" aria-labelledby="page-title">
         <a class="brand" href="/" aria-label="TESTSPEED">
-          <svg class="brand-gauge" viewBox="0 0 64 48" aria-hidden="true"><path d="M8 38a24 24 0 1 1 48 0M10 30l7-2m4-19 4 6m18-6-4 6m15 15-7-2"/><path class="gauge-needle" d="m32 31 12-12"/><circle cx="32" cy="31" r="3"/></svg>
+          <svg class="brand-gauge" viewBox="0 0 160 100" aria-hidden="true">
+            <path class="gauge-outer" d="M24 78a56 56 0 0 1 16.4-39.6M52 29.5a56 56 0 0 1 56 0M119.6 38.4A56 56 0 0 1 136 78"/>
+            <path class="gauge-middle" d="M36 78a44 44 0 0 1 88 0"/>
+            <path class="gauge-inner" d="M48 78a32 32 0 0 1 64 0"/>
+            <path class="gauge-needle" d="m75 75 43-43-32 51Z"/>
+            <circle class="gauge-hub" cx="80" cy="78" r="8"/><circle class="gauge-center" cx="80" cy="78" r="3"/>
+          </svg>
           <span>TESTSPEED</span>
         </a>
         <h1 id="page-title" data-i18n="pageTitle">你的网速是</h1>
         <div class="hero-measurement">
-          <span id="download-value" class="hero-value">—</span>
+          <span id="download-value" class="hero-value is-pending">0</span>
           <div class="unit-controls">
             <span id="download-unit" class="hero-unit">Mbps</span>
             <small id="download-unit-description" class="visually-hidden" data-i18n="unitMbpsDescription">兆比特 / 秒</small>
@@ -47,12 +53,20 @@
 
       <section id="more-details" class="more-details" aria-label="测速详情" data-i18n-aria-label="moreInfo" hidden>
         <div class="summary-grid">
-          <div class="summary-item"><span data-i18n="uploadLabel">上传速度</span><div class="summary-measurement"><strong id="upload-value">—</strong><small id="upload-unit">Mbps</small></div></div>
+          <div class="summary-item"><span data-i18n="uploadLabel">上传速度</span><div class="summary-measurement"><strong id="upload-value" class="is-pending">0</strong><small id="upload-unit">Mbps</small></div></div>
           <div class="summary-item"><span data-i18n="idleLatency">空闲延迟</span><div class="summary-measurement"><strong id="idle-latency-value">—</strong><small>ms</small></div></div>
           <div class="summary-item"><span data-i18n="jitter">延迟抖动</span><div class="summary-measurement"><strong id="jitter-value">—</strong><small>ms</small></div></div>
         </div>
         <div class="node-line"><span id="connection-dot" class="connection-dot"></span><span id="node-name">连接测速节点</span></div>
         <p id="transport-message" class="transport-message" role="status" hidden></p>
+        <div class="network-information" aria-labelledby="network-information-title">
+          <h2 id="network-information-title" data-i18n="networkInformation">网络信息</h2>
+          <div class="network-information-grid">
+            <div><span data-i18n="clientIp">客户端 IP</span><strong id="client-ip">—</strong></div>
+            <div><span data-i18n="clientLocation">客户端位置</span><strong id="client-location">—</strong><small id="client-location-note"></small></div>
+            <div><span data-i18n="serverLocation">服务器位置</span><strong id="server-location">—</strong><small id="server-location-note"></small></div>
+          </div>
+        </div>
 
         <div class="details-heading"><h2 data-i18n="connectionPerformance">连接表现</h2><div class="chart-legend"><span><i class="download-key"></i><span data-i18n="downloadLabel">下载</span></span><span><i class="upload-key"></i><span data-i18n="uploadLabel">上传</span></span></div></div>
         <div class="chart-container">

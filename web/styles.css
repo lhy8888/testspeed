@@ -13,16 +13,18 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .language-bar { position: absolute; right: 28px; top: 25px; z-index: 2; }
 .language-bar select { border: 0; background: #fff; color: #555; padding: 7px 22px 7px 7px; font-size: 13px; cursor: pointer; }
 .page-shell { width: 100%; flex: 1; }
-.hero { text-align: center; padding: 88px 24px 65px; }
-.brand { display: inline-flex; align-items: center; gap: 11px; color: #e32529; text-decoration: none; font-size: 29px; font-weight: 800; letter-spacing: 2px; }
-.brand-gauge { width: 61px; height: 46px; fill: none; stroke: currentColor; stroke-width: 3.3; stroke-linecap: round; stroke-linejoin: round; }
-.brand-gauge circle { fill: currentColor; stroke: none; }
-.gauge-needle { stroke-width: 4; }
-h1 { margin: 65px 0 8px; font-size: 25px; font-weight: 400; letter-spacing: .2px; }
+.hero { text-align: center; padding: 65px 24px 65px; }
+.brand { display: inline-flex; flex-direction: column; align-items: center; width: 200px; gap: 4px; color: #e32529; text-decoration: none; font-size: 25px; font-weight: 800; letter-spacing: 2.4px; line-height: 1.15; }
+.brand-gauge { display: block; width: 154px; height: 96px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; }
+.gauge-outer { stroke-width: 8; }.gauge-middle { stroke-width: 6; }.gauge-inner { stroke-width: 4; opacity: .65; }
+.gauge-needle { fill: #cb1921; stroke: none; }.gauge-hub { fill: currentColor; stroke: none; }.gauge-center { fill: #fff; stroke: none; }
+h1 { margin: 35px 0 8px; font-size: 25px; font-weight: 400; letter-spacing: .2px; }
 .hero-measurement { display: flex; align-items: center; justify-content: center; gap: 29px; min-height: 257px; }
-.hero-value { font-size: clamp(140px, 18vw, 246px); font-weight: 600; letter-spacing: -12px; line-height: 1.03; font-variant-numeric: tabular-nums; }
+.hero-value { color: #aaa; font-size: clamp(140px, 18vw, 246px); font-weight: 600; letter-spacing: -12px; line-height: 1.03; font-variant-numeric: tabular-nums; }
 .hero-value.compact { font-size: clamp(110px, 15vw, 208px); }
-.hero-value.measuring { color: #666; }
+.hero-value.measuring { color: #888; }
+.hero-value.is-settled { color: #111; }
+.hero-value.is-pending { color: #aaa; }
 .unit-controls { display: flex; align-items: center; flex-direction: column; gap: 22px; padding-top: 20px; }
 .hero-unit { font-size: 48px; font-weight: 400; line-height: 1.2; }
 .test-controls { min-height: 51px; }
@@ -41,6 +43,7 @@ h1 { margin: 65px 0 8px; font-size: 25px; font-weight: 400; letter-spacing: .2px
 .summary-item > span { color: #777; font-size: 14px; }
 .summary-measurement { display: flex; align-items: baseline; justify-content: center; gap: 8px; margin-top: 11px; }
 .summary-measurement strong { font-size: 40px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.summary-measurement strong.is-pending { color: #aaa; }
 .summary-measurement small { color: #777; font-size: 13px; }
 .node-line { display: flex; align-items: center; justify-content: center; gap: 7px; color: #888; font-size: 12px; margin: 12px 0; }
 .connection-dot { width: 6px; height: 6px; border-radius: 50%; background: #aaa; }
@@ -48,6 +51,12 @@ h1 { margin: 65px 0 8px; font-size: 25px; font-weight: 400; letter-spacing: .2px
 .connection-dot.disconnected { background: #c45b50; }
 .transport-message { color: #777; font-size: 12px; line-height: 1.8; margin: 9px 0 24px; text-align: center; }
 .transport-message.is-fallback { color: #a2753f; }
+.network-information { margin-top: 25px; border-top: 1px solid #e6e6e6; padding-top: 23px; }
+.network-information-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 25px; margin-top: 22px; }
+.network-information-grid > div { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
+.network-information-grid > div > span { color: #888; font-size: 11px; }
+.network-information-grid strong { font-size: 14px; font-weight: 400; line-height: 1.5; overflow-wrap: anywhere; }
+.network-information-grid small { color: #999; font-size: 10px; line-height: 1.7; }
 .details-heading, .diagnostics-heading { display: flex; justify-content: space-between; align-items: center; gap: 15px; border-top: 1px solid #e6e6e6; padding-top: 23px; margin-top: 25px; }
 h2 { margin: 0; font-size: 14px; font-weight: 500; color: #555; }
 .chart-legend { display: flex; gap: 15px; color: #888; font-size: 11px; }
@@ -103,14 +112,15 @@ h2 { margin: 0; font-size: 14px; font-weight: 500; color: #555; }
 .site-footer a:hover { color: #777; text-decoration: underline; }
 @media (max-width: 650px) {
  .language-bar { right: 14px; top: 16px; }.language-bar select { font-size: 11px; }
- .hero { padding: 99px 16px 43px; }.brand { font-size: 23px; gap: 8px; letter-spacing: 1.6px; }.brand-gauge { width: 48px; height: 38px; }
- h1 { font-size: 21px; margin: 57px 0 17px; }.hero-measurement { min-height: 170px; gap: 14px; }
+ .hero { padding: 76px 16px 43px; }.brand { width: 158px; font-size: 20px; gap: 2px; letter-spacing: 1.6px; }.brand-gauge { width: 123px; height: 77px; }
+ h1 { font-size: 21px; margin: 37px 0 17px; }.hero-measurement { min-height: 170px; gap: 14px; }
  .hero-value { font-size: clamp(84px, 27vw, 168px); letter-spacing: -6px; }.hero-value.compact { font-size: clamp(72px, 22vw, 145px); }
  .hero-unit { font-size: 27px; }.unit-controls { gap: 16px; padding-top: 8px; }.round-button { width: 39px; height: 39px; }.round-button .icon { width: 20px; height: 20px; }.test-controls { min-height: 39px; }
  .play-icon { border-top-width: 6px; border-bottom-width: 6px; border-left-width: 8px; }.stop-icon { width: 10px; height: 10px; }
  .status-message { margin-top: 16px; font-size: 11px; }.more-info-button { font-size: 12px; margin-top: 25px; padding: 10px 18px; }
  .more-details { width: calc(100% - 40px); margin-bottom: 25px; }.summary-grid { gap: 12px; }.summary-item > span { font-size: 11px; }.summary-measurement { gap: 4px; }.summary-measurement strong { font-size: 28px; }.summary-measurement small { font-size: 10px; }
  .detail-metrics, .diagnostic-metrics { grid-template-columns: repeat(2,1fr); gap: 22px 15px; }.diagnostic-metrics > div > span > small { display: block; margin: 4px 0 0; }
+ .network-information-grid { grid-template-columns: 1fr; gap: 19px; }.network-information-grid > div { gap: 5px; }
  .chart-container { height: 95px; }.details-heading, .diagnostics-heading { padding-top: 20px; }.mode-setting { flex-direction: column; align-items: stretch; gap: 12px; }.mode-control label { flex: 1; }
  .settings-summary { font-size: 9px; }.settings-row { gap: 15px; }.setting-label > span,.setting-label > label { font-size: 12px; }.setting-label p { font-size: 10px; }.settings-fields select { width: 145px; font-size: 11px; }
  .site-footer { gap: 20px; font-size: 9px; padding-bottom: 25px; }.metrics-caption, .settings-caption { font-size: 10px; }

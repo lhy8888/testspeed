@@ -6,6 +6,7 @@ import { createNetworkFixture } from './browser-network-fixture.mjs';
 
 const baseURL = process.env.BASE_URL || 'http://127.0.0.1:8080';
 const artifacts = process.env.TEST_ARTIFACT_DIR || '/tmp/testspeed-ui';
+const skipManual = process.env.UI_SKIP_MANUAL === '1';
 await mkdir(artifacts, { recursive: true });
 const fixture = await createNetworkFixture(baseURL, { downloadMbps: 120, uploadMbps: 60, streams: 30 });
 const browser = await launchBrowser();
@@ -20,6 +21,15 @@ try {
   assert.equal(await page.locator('#more-details').isVisible(), false, 'the initial page should show the primary download result');
   assert.equal(await page.locator('#more-info-button').getAttribute('aria-expanded'), 'false');
   assert.equal(await page.locator('#upload-value').isVisible(), false);
+  for (const id of ['download-value', 'upload-value']) {
+    assert.equal(await page.locator(`#${id}`).textContent(), '0', 'initial speed is an unmeasured zero');
+    assert.equal(await page.locator(`#${id}`).getAttribute('data-mbps'), null, 'initial zero must not be recorded as a measurement');
+    const channels = await page.locator(`#${id}`).evaluate(element => getComputedStyle(element).color.match(/\d+/g).slice(0, 3).map(Number));
+    assert.ok(channels.every(channel => channel >= 120), 'unmeasured zero should remain gray');
+  }
+  const logo = await page.locator('.brand-gauge').boundingBox();
+  const brandText = await page.locator('.brand > span').boundingBox();
+  assert.ok(logo && brandText && brandText.y >= logo.y + logo.height - 1, 'the new gauge and TESTSPEED name should stack vertically');
   assert.equal(await page.locator('#language-select').inputValue(), 'en', 'a new browser should use its supported preferred language');
   assert.equal(await page.locator('html').getAttribute('lang'), 'en');
   await page.locator('#language-select').selectOption('zh');
@@ -35,6 +45,7 @@ try {
   await page.waitForFunction(() => Number(document.querySelector('#download-value').dataset.mbps) > 0, null, { timeout: 10000 });
   assert.equal(await page.locator('#more-details').isVisible(), false, 'measurements should preserve the collapsed default page');
   assert.equal(await page.locator('#upload-value').textContent(), initialUpload);
+  assert.equal(await page.locator('#upload-value').getAttribute('data-mbps'), null, 'upload remains unmeasured during download');
   const liveDownloadColor = await page.locator('#download-value').evaluate(element => getComputedStyle(element).color);
   await page.screenshot({ path: join(artifacts, 'desktop-download-live.png'), fullPage: true });
   await waitPhase(page, '正在测量上传');
@@ -46,6 +57,7 @@ try {
   await page.waitForTimeout(900);
   assert.equal(Number(await page.locator('#download-value').getAttribute('data-mbps')), finalDownload, 'the completed download result must stay stable during upload');
   assert.equal(await page.locator('#upload-value').textContent(), initialUpload, 'upload should show its final value only after its measurement window ends');
+  assert.equal(await page.locator('#upload-value').getAttribute('data-mbps'), null);
   const upgradesBeforeLanguageChange = fixture.stats.upgrades;
   await page.locator('#language-select').selectOption('en');
   assert.equal(await page.locator('#phase-label').getAttribute('data-phase'), 'upload');
@@ -75,16 +87,19 @@ try {
   assert.equal(Number(await page.locator('#download-value').getAttribute('data-mbps')), finalDownload, 'changing language must preserve the actual result');
   await page.screenshot({ path: join(artifacts, 'desktop-details-english.png'), fullPage: true });
 
-  await page.locator('#stream-count').fill('30');
-  await page.locator('#start-button').click();
-  await waitPhase(page, '正在测量下载');
-  await waitPhase(page, '正在测量上传');
-  await waitPhase(page, '测速完成');
-  const manualMetrics = await readMetrics(page);
-  assert.equal(Number(manualMetrics.tcpDetails.peak), 30, 'manual connections remain effective through the expanded settings');
-  assert.ok(manualMetrics.downloadMbps > 0 && manualMetrics.uploadMbps > 0);
-  assert.equal(manualMetrics.failureRate, 0);
-  await page.screenshot({ path: join(artifacts, 'desktop-manual-30-english.png'), fullPage: true });
+  let manualMetrics = null;
+  if (!skipManual) {
+    await page.locator('#stream-count').fill('30');
+    await page.locator('#start-button').click();
+    await waitPhase(page, '正在测量下载');
+    await waitPhase(page, '正在测量上传');
+    await waitPhase(page, '测速完成');
+    manualMetrics = await readMetrics(page);
+    assert.equal(Number(manualMetrics.tcpDetails.peak), 30, 'manual connections remain effective through the expanded settings');
+    assert.ok(manualMetrics.downloadMbps > 0 && manualMetrics.uploadMbps > 0);
+    assert.equal(manualMetrics.failureRate, 0);
+    await page.screenshot({ path: join(artifacts, 'desktop-manual-30-english.png'), fullPage: true });
+  }
 
   await page.setViewportSize({ width: 320, height: 844 });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'expanded results/settings must fit a 320px viewport');

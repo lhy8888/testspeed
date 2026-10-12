@@ -12,6 +12,9 @@ services:
       MEASUREMENT_PORTS: ""
       MAX_TEST_STREAMS: "30"
       PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:-}"
+      SERVER_LOCATION: "${SERVER_LOCATION:-}"
+      GEOIP_ENABLED: "${GEOIP_ENABLED:-true}"
+      TRUSTED_PROXIES: "${TRUSTED_PROXIES:-}"
     restart: unless-stopped
     read_only: true
     cap_drop:

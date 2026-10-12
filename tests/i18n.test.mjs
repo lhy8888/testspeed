@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import {
   applyLanguageText, detectInitialLanguage, getLanguage, initialLang, LANGUAGE_STORAGE_KEY,
-  onLanguageChange, setLanguage, supportedLanguages, t, translateError, translations,
+  localizeCountry, onLanguageChange, setLanguage, supportedLanguages, t, translateError, translations,
 } from '../web/i18n.js';
 
 function replaceGlobal(context, name, value) {
@@ -166,6 +166,37 @@ test('Worker errors translate direction, HTTP status and limits without losing d
   setLanguage('zh');
   assert.equal(translateError(new Error('上传测速没有收到有效数据，请检查连接后重试。')), '上传测速没有收到有效数据，请检查连接后重试。');
   assert.equal(translateError(new Error(translations.en.offline)), translations.zh.offline);
+});
+
+test('country codes translate from cached network information without changing configured labels', () => {
+  const cached = Object.freeze({ countryCode: 'US', country: 'United States', label: 'A privately configured server location' });
+  setLanguage('en');
+  assert.equal(localizeCountry(cached.countryCode, cached.country), 'United States');
+  assert.equal(localizeCountry('gb', 'United Kingdom'), 'United Kingdom');
+  setLanguage('zh');
+  assert.equal(localizeCountry(cached.countryCode, cached.country), '美国');
+  assert.equal(localizeCountry('gb', 'United Kingdom'), '英国');
+  for (const invalid of ['', null, undefined, 'USA', '<script>', '12']) {
+    assert.equal(localizeCountry(invalid, cached.label), cached.label);
+  }
+  assert.equal(localizeCountry('ZZ', cached.label), cached.label);
+  assert.equal(cached.label, 'A privately configured server location');
+});
+
+test('network information labels distinguish unavailable, private and approximate locations in both languages', () => {
+  setLanguage('zh');
+  assert.equal(t('networkLoading'), '正在获取…');
+  assert.equal(t('networkPrivate'), '内网');
+  assert.equal(t('networkLocationUnavailable'), '位置暂不可用');
+  assert.equal(t('networkLocationDisabled'), '未启用定位');
+  assert.ok(t('networkServerApproximate').includes('出口 IP'));
+  setLanguage('en');
+  assert.equal(t('networkLoading'), 'Loading…');
+  assert.equal(t('networkPrivate'), 'Private network');
+  assert.equal(t('networkLocationUnavailable'), 'Location unavailable');
+  assert.equal(t('networkLocationDisabled'), 'Location lookup disabled');
+  assert.ok(t('networkServerApproximate').includes('outbound IP'));
+  assert.ok(t('networkClientApproximate').includes('actual location may differ'));
 });
 
 test('both dictionaries cover all declared UI keys and keep technical units unchanged', async () => {

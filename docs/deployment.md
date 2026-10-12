@@ -7,7 +7,7 @@
 适用于 amd64/ARM64、使用 systemd 的现代 Linux，需 `curl`、`tar`、`sha256sum` 和 sudo：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/lhy8888/testspeed/v0.1.1/deploy/manage.sh | sudo bash -s -- install
+curl -fsSL https://raw.githubusercontent.com/lhy8888/testspeed/v0.1.2/deploy/manage.sh | sudo bash -s -- install
 ```
 
 安装后打开 `http://服务器IP:8080`。允许客户端访问该端口；脚本不会修改防火墙或 Docker。脚本从 [GitHub Releases](https://github.com/lhy8888/testspeed/releases/latest) 下载对应架构的包，校验 SHA256，安装后检查健康状态；失败时自动恢复旧文件和服务状态。
@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/lhy8888/testspeed/v0.1.1/deploy/man
 sudo /opt/testspeed/manage.sh update
 ```
 
-更新使用最新正式版，保留现有配置和 unit，并重启服务。指定版本、回退也用同一命令，例如 `sudo /opt/testspeed/manage.sh update v0.1.1`。首次安装也可在 `install` 后指定版本。旧版包缺少管理脚本时，更新保留当前已安装的管理脚本；初次安装应选择 v0.1.1 或更新版本。
+更新使用最新正式版，保留现有配置和 unit，并重启服务。指定版本、回退也用同一命令，例如 `sudo /opt/testspeed/manage.sh update v0.1.2`。首次安装也可在 `install` 后指定版本。旧版包缺少管理脚本时，更新保留当前已安装的管理脚本；初次安装应选择 v0.1.1 或更新版本。
 
 | 操作 | 命令 |
 | --- | --- |
@@ -65,6 +65,9 @@ sudo /opt/testspeed/manage.sh restart
 | `MEASUREMENT_ORIGINS` | 自动推导 | 可选 HTTP 测速 origin 列表，显式指定时必须同时设置 `PUBLIC_ORIGIN` |
 | `NODE_ID` | `local` | 节点标识 |
 | `NODE_NAME` | `默认测速节点` | 节点名称 |
+| `SERVER_LOCATION` | 空 | 手动设置服务器所在地文本，优先于自动查询，例如 `中国·上海` |
+| `GEOIP_ENABLED` | `true` | 使用固定 HTTPS GeoIP 服务；`false` 禁用第三方查询 |
+| `TRUSTED_PROXIES` | 空 | 可信代理 IP/CIDR，逗号分隔；默认忽略转发头，仅使用连接对端 IP |
 | `MAX_CONCURRENT_TEST_REQUESTS` | `128` | 服务端测量请求总上限，范围 1–4096；不是在线用户数 |
 | `UPLOAD_SESSION_LIMIT` | `256` | 短期上传会话上限，范围 1–4096 |
 | `TEST_DOWNLOAD_DURATION_MS` | `10000` | 下载计量窗口，范围 1000–60000 ms，不含预热 |
@@ -75,6 +78,23 @@ sudo /opt/testspeed/manage.sh restart
 默认并发 8 是客户端配置的一部分，没有 `DEFAULT_STREAMS` 环境变量。用户可在页面自行调整。HTTP 单端口连接池有效上限 4 路；四个独立数据端口有效上限 24 路。
 
 </details>
+
+### IP 和所在地
+
+默认使用 FreeIPAPI 的固定 HTTPS 接口 `https://free.freeipapi.com/api/json/{ip}`，将公开客户端 IP 发送给第三方查询。结果是 IP 网络的近似所在地，不是 GPS，也不保证设备或机房的物理位置；私网、回环等非公开地址不会发送给第三方。断网、查询失败、限速或额度耗尽只影响所在地显示，不阻止测速。
+
+服务器所在地优先使用手动设置的 `SERVER_LOCATION`。未设置且启用 GeoIP 时，自动查询只能近似反映服务器的公网出口，代理或 NAT 可能使其不同于实际机房。企业内网可在 `/etc/testspeed/testspeed.env` 中使用：
+
+```ini
+SERVER_LOCATION=中国·上海
+GEOIP_ENABLED=false
+```
+
+然后执行 `sudo /opt/testspeed/manage.sh restart`。禁用 GeoIP 后仍显示连接来源 IP 和已配置的服务器位置。
+
+经过反向代理时，仅配置该代理实际使用的地址或 CIDR，例如 `TRUSTED_PROXIES=127.0.0.1/32,::1/128`。默认不信任 `Forwarded` / `X-Forwarded-For`；启用后从连接对端开始，自右向左剥离可信代理，使用遇到的首个非可信地址。两类转发头并存时，解析出的客户端必须一致；无效、过长或歧义头回退到实际连接对端。代理应清洗并追加转发头，避免把用户自填的头当作来源。
+
+FreeIPAPI 免费接口额度按服务器公网出口共享，当前为 60 次/分钟。应用限制为最多 45 次/分钟，并使用有上限的短期缓存；多个实例共用出口时仍可能触发服务商限额。页面异步加载这些信息，测速流程不等待 GeoIP。
 
 旧版本升级不会覆盖显式的 `MAX_TEST_STREAMS=24`、监听端口或 TLS 设置。要切换到新的单端口 WebSocket、最大 30 路默认配置：
 
@@ -109,14 +129,14 @@ ARM64 将文件名中的 `amd64` 换为 `arm64`。脚本再次校验包，不访
 官方 Docker Engine：
 
 ```sh
-sudo git clone --depth 1 --branch v0.1.1 https://github.com/lhy8888/testspeed.git /opt/testspeed-src
+sudo git clone --depth 1 --branch v0.1.2 https://github.com/lhy8888/testspeed.git /opt/testspeed-src
 sudo docker compose --project-directory /opt/testspeed-src -f /opt/testspeed-src/compose.yaml up --build --detach
 ```
 
 Docker Snap 使用其可访问的公共目录，并添加 Snap override：
 
 ```sh
-sudo git clone --depth 1 --branch v0.1.1 https://github.com/lhy8888/testspeed.git /var/snap/docker/common/testspeed-src
+sudo git clone --depth 1 --branch v0.1.2 https://github.com/lhy8888/testspeed.git /var/snap/docker/common/testspeed-src
 sudo docker compose --project-directory /var/snap/docker/common/testspeed-src -f /var/snap/docker/common/testspeed-src/compose.yaml -f /var/snap/docker/common/testspeed-src/compose.snap.yaml up --build --detach
 ```
 
@@ -137,7 +157,7 @@ sudo cp -a /opt/testspeed-src/. /var/snap/docker/common/testspeed-src/
 
 ```sh
 sudo git -C /opt/testspeed-src fetch --tags origin
-sudo git -C /opt/testspeed-src checkout v0.1.1
+sudo git -C /opt/testspeed-src checkout v0.1.2
 sudo docker compose --project-directory /opt/testspeed-src -f /opt/testspeed-src/compose.yaml up --build --detach
 sudo docker compose --project-directory /opt/testspeed-src -f /opt/testspeed-src/compose.yaml logs --follow
 ```

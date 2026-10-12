@@ -39,6 +39,11 @@ export const translations = Object.freeze({
     clientScheduling: "浏览器调度较慢，可能限制本次测速上限。",
     latencyCaption: "延迟为 HTTP 往返时间；请求失败率不代表网络丢包率。",
     transportCaption: "TCP 数是测速服务看到的连接；经过代理时仅反映代理到服务端的连接。带宽时延积是吞吐 × RTT 的在途数据估算。",
+    networkInformation: "网络信息", clientIp: "你的 IP", clientLocation: "你的位置", serverLocation: "服务器位置",
+    networkLoading: "正在获取…", networkInfoUnavailable: "暂不可用", networkLocationUnavailable: "位置暂不可用", networkLocationDisabled: "未启用定位",
+    networkPrivate: "内网", networkLoopback: "本机", networkLinkLocal: "链路本地", networkReserved: "保留地址",
+    networkClientApproximate: "按 IP 估算，可能与实际位置不同。", networkServerApproximate: "按服务器出口 IP 估算，非精确物理位置。",
+    networkForwardedIp: "可信代理转发的客户端 IP", networkObservedIp: "测速服务看到的客户端 IP",
     errorNodeAddress: "测速节点地址不受支持，请使用安全的 HTTP 或 HTTPS 地址。",
     errorConfig: "测速服务配置无效，请更新服务端与页面后重试。", errorNodeConfig: "测速节点配置无效。",
     errorOriginConfig: "测速连接地址配置无效。", errorTooManyOrigins: "测速连接地址过多，请检查服务配置。",
@@ -91,6 +96,11 @@ export const translations = Object.freeze({
     clientScheduling: "Browser scheduling is slow and may limit this test's maximum speed.",
     latencyCaption: "Latency is HTTP round-trip time. Request failures do not measure network packet loss.",
     transportCaption: "TCP counts are observed by the test server. Behind a proxy, they describe connections from the proxy to the server. The bandwidth-delay product estimates data in flight as throughput × RTT.",
+    networkInformation: "Network information", clientIp: "Your IP", clientLocation: "Your location", serverLocation: "Server location",
+    networkLoading: "Loading…", networkInfoUnavailable: "Unavailable", networkLocationUnavailable: "Location unavailable", networkLocationDisabled: "Location lookup disabled",
+    networkPrivate: "Private network", networkLoopback: "Local machine", networkLinkLocal: "Link-local", networkReserved: "Reserved address",
+    networkClientApproximate: "Estimated from your IP. Your actual location may differ.", networkServerApproximate: "Estimated from the server's outbound IP, rather than its exact physical location.",
+    networkForwardedIp: "Client IP forwarded by a trusted proxy", networkObservedIp: "Client IP observed by the test service",
     errorNodeAddress: "The test node address is unsupported. Use a secure HTTP or HTTPS address.",
     errorConfig: "The test service configuration is invalid. Update the server and page, then try again.", errorNodeConfig: "The test node configuration is invalid.",
     errorOriginConfig: "The test connection addresses are invalid.", errorTooManyOrigins: "Too many test connection addresses. Check the service configuration.",
@@ -129,6 +139,14 @@ export const initialLang = detectInitialLanguage();
 let language = initialLang;
 const listeners = new Set();
 export const getLanguage = () => language;
+
+export function localizeCountry(countryCode, fallback = "") {
+  if (typeof countryCode !== "string" || !/^[A-Za-z]{2}$/.test(countryCode)) return fallback;
+  if (countryCode.toUpperCase() === "ZZ") return fallback;
+  try {
+    return new Intl.DisplayNames([language === "zh" ? "zh-CN" : "en"], { type: "region", fallback: "none" }).of(countryCode.toUpperCase()) || fallback;
+  } catch { return fallback; }
+}
 
 export function t(key, vars = {}) {
   const name = String(key);
