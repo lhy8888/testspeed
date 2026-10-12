@@ -46,7 +46,7 @@ func TestConfigPingAndHealth(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &config); err != nil {
 		t.Fatal(err)
 	}
-	if config.ProtocolVersion != 2 || len(config.Nodes) != 1 || config.Nodes[0].ID != "test-node" || config.Nodes[0].BaseURL != "" || config.Test.DownloadChunkBytes != defaultDownloadBytes || config.Test.MaxStreams != 4 || !config.Features.LoadedLatency {
+	if config.ProtocolVersion != 2 || len(config.Nodes) != 1 || config.Nodes[0].ID != "test-node" || config.Nodes[0].BaseURL != "" || config.Test.DownloadChunkBytes != defaultDownloadBytes || config.Test.MaxStreams != 30 || !config.Features.LoadedLatency {
 		t.Fatalf("unexpected public protocol: %+v", config)
 	}
 	w = request(server, http.MethodGet, "/api/ping?nonce=uncached", nil)

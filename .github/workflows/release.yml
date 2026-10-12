@@ -83,7 +83,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          printf 'Single-node browser speed test platform.\n\nSource commit: %s.\n\nPackages include the application, native throughput client, README, and Linux systemd examples. Verify downloads with SHA256SUMS.\n' "$GITHUB_SHA" > "$RUNNER_TEMP/testspeed-release-notes.md"
+          printf 'Single-node browser speed test platform.\n\nSource commit: %s.\n\nPackages include the application, native throughput client, README, and Linux systemd examples. Verify downloads with SHA256SUMS.\n\n' "$GITHUB_SHA" > "$RUNNER_TEMP/testspeed-release-notes.md"
+          if [[ -f CHANGELOG.md ]]; then
+            awk -v heading="## $RELEASE_TAG" '$0 == heading { printing = 1; next } printing && /^## / { exit } printing { print }' CHANGELOG.md >> "$RUNNER_TEMP/testspeed-release-notes.md"
+          fi
           gh release create "$RELEASE_TAG" artifacts/dist/testspeed-*.tar.gz artifacts/dist/SHA256SUMS \
             --verify-tag --draft --title "testspeed $RELEASE_TAG" \
             --notes-file "$RUNNER_TEMP/testspeed-release-notes.md"

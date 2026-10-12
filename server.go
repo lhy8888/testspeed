@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 const (
@@ -24,13 +26,15 @@ const (
 )
 
 type speedServer struct {
-	config      Config
-	web         fs.FS
-	payload     []byte
-	requests    chan struct{}
-	sessions    *uploadSessions
-	runs        downloadRuns
-	readBuffers sync.Pool
+	config           Config
+	web              fs.FS
+	payload          []byte
+	requests         chan struct{}
+	sessions         *uploadSessions
+	runs             downloadRuns
+	readBuffers      sync.Pool
+	webSockets       socketRegistry
+	preparedDownload map[int]*websocket.PreparedMessage
 }
 
 func newSpeedServer(config Config, web fs.FS) (*speedServer, error) {
@@ -48,13 +52,17 @@ func newSpeedServer(config Config, web fs.FS) (*speedServer, error) {
 	if limit == 0 {
 		limit = 256
 	}
-	return &speedServer{
+	server := &speedServer{
 		config: config, web: web, payload: payload,
 		requests:    make(chan struct{}, config.MaxConcurrentRequests),
 		sessions:    &uploadSessions{entries: make(map[string]*uploadSession), limit: limit},
 		runs:        downloadRuns{entries: make(map[string]*downloadRun)},
 		readBuffers: sync.Pool{New: func() any { buffer := make([]byte, 64<<10); return &buffer }},
-	}, nil
+	}
+	if err := server.prepareWebSocketData(); err != nil {
+		return nil, err
+	}
+	return server, nil
 }
 
 func (server *speedServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -72,6 +80,10 @@ func (server *speedServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch r.URL.Path {
+	case "/api/ws":
+		if requireMethod(w, r, http.MethodGet) {
+			server.websocket(w, r)
+		}
 	case "/api/config":
 		if requireMethod(w, r, http.MethodGet) {
 			config, err := server.config.clientConfig(r)
@@ -112,7 +124,7 @@ func (server *speedServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	case "/healthz":
 		if requireMethod(w, r, http.MethodGet) {
-			writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "nodeId": server.config.NodeID})
+			writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "nodeId": server.config.NodeID, "version": version})
 		}
 	default:
 		if strings.HasPrefix(r.URL.Path, "/api/") {
@@ -124,7 +136,7 @@ func (server *speedServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (server *speedServer) serveMeasurementHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/api/download" && r.URL.Path != "/api/upload" && r.URL.Path != "/healthz" {
+	if r.URL.Path != "/api/download" && r.URL.Path != "/api/upload" && r.URL.Path != "/api/ws" && r.URL.Path != "/healthz" {
 		noStore(w)
 		writeError(w, http.StatusNotFound, "route is available only on the control listener")
 		return
@@ -418,6 +430,10 @@ func (server *speedServer) static(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request origin")
 		return
 	}
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' "+strings.Join(origins, " ")+"; img-src 'self' data:; worker-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+	connectOrigins := append([]string{}, origins...)
+	for _, origin := range origins {
+		connectOrigins = append(connectOrigins, strings.Replace(strings.Replace(origin, "https://", "wss://", 1), "http://", "ws://", 1))
+	}
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self' "+strings.Join(connectOrigins, " ")+"; img-src 'self' data:; worker-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
 	http.ServeContent(w, r, name, time.Time{}, bytes.NewReader(content))
 }

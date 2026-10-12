@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { launchBrowser, readMetrics, waitPhase } from './browser-helpers.mjs';
+import { launchBrowser, openDetails, readMetrics, waitPhase } from './browser-helpers.mjs';
 
 const baseURL = process.env.BASE_URL || 'http://127.0.0.1:8080';
 const artifactDirectory = process.env.TEST_ARTIFACT_DIR || '/tmp/testspeed-browser-v2';
@@ -13,7 +13,7 @@ const runtimeErrors = [];
 const transferPattern = /\/api\/(ping|download|upload)(?:\?|$)/;
 
 async function openPage(viewport = { width: 1440, height: 1100 }) {
-  const context = await browser.newContext({ viewport });
+  const context = await browser.newContext({ viewport, locale: 'zh-CN' });
   const page = await context.newPage();
   page.on('pageerror', error => runtimeErrors.push(error.message));
   const responses = [];
@@ -36,12 +36,15 @@ async function openPage(viewport = { width: 1440, height: 1100 }) {
   });
   await page.goto(baseURL, { waitUntil: 'networkidle' });
   await page.waitForFunction(() => !document.querySelector('#start-button').disabled);
+  const config = await (await context.request.get(`${baseURL}/api/config`)).json();
+  assert.equal(config.performance.transport, 'http', 'use the HTTP fixture for this suite and browser-websocket.mjs for the default WebSocket deployment');
   assert.equal(await page.locator('html').getAttribute('lang'), 'zh-CN');
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, 'page should fit the viewport');
   return { page, context, requests, responses, sessionIDs, sessionSnapshots, snapshotsPending, runs };
 }
 
 async function manualStreams(page, count) {
+  await openDetails(page);
   if (await page.locator('#test-settings').getAttribute('open') === null) await page.locator('#test-settings > summary').click();
   await page.locator('#mode-manual').check();
   await page.locator('#stream-count').fill(String(count));
@@ -112,6 +115,7 @@ try {
   if (!onlyRemaining) {
   const desktop = await openPage();
   await desktop.page.screenshot({ path: join(artifactDirectory, 'desktop-ready.png'), fullPage: true });
+  await openDetails(desktop.page);
   await desktop.page.locator('#test-settings > summary').click();
   await desktop.page.screenshot({ path: join(artifactDirectory, 'desktop-advanced-ready.png'), fullPage: true });
   for (const count of streamCounts) {

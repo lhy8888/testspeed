@@ -1,4 +1,24 @@
-# 协议 v2 验证结果
+# 验证记录
+
+## v0.1.1：单端口、8–30 路与极简界面
+
+2026-10-12 在当前 Linux 云环境完成。Go 1.27.2、Node.js 26.11.1、Playwright 1.64.0、Chromium 154；原生实例分别验证默认 WebSocket、HTTP 多端口和 HTTP 单端口。
+
+- 全部 Go 竞态测试、`go vet` 和 `go mod verify` 通过。
+- JavaScript 单元及部署事务测试 **55 项全部通过，无跳过**。其中部署脚本使用隔离目录和假的 systemctl/curl 验证，不能算真实 systemd 安装。
+- WebSocket 浏览器套件 10 项结果通过：默认 8 路、手动 1/4/8/16/30 路、手机停止与重测、离线/后台停止、真实 Upgrade 拒绝后的 HTTP 回退，以及慢速链路。
+- 每次完整 WebSocket 测试分别核对下载 run 和上传会话的服务端 TCP 峰值，均等于请求的路数；上传页面结果与最终服务器字节及窗口一致。正常完整测试失败率为 0，结束后连接与会话释放。
+- 新增真实 WSS 测试：信任测试证书并验证证书链，单端口 8 条独立连接，双方确认 TLS 1.3 和 HTTP/1.1 Upgrade；未关闭证书验证。
+- 修复并验证上传窗口截止的关闭竞态：正常结束发送 `1000 / session_finished`；提前断线不会被标为成功。
+- HTTP 网络访问套件 6 项通过：四端口受阻回退 4 路、两端口可达使用 12 路、全部可达实际 24 路、不可达报错、取消探测、单端口完整传输。阻断规则明确作用于 DedicatedWorker。
+- 独立界面套件通过：默认隐藏更多内容，下载实时显示，上传期间下载最终值保持且上传值尚未显示；完成后显示上传；中英切换不重测、不丢结果；语言选择可保存；320 像素手机展开与折叠无横向溢出。
+- 最终 scratch 镜像构建通过。Compose 5.5.1 的默认单端口配置和 Snap override 在普通 Docker 上实际启动、非 root/只读/cap_drop ALL 及接口检查通过；可选 HTTP override 合并通过。真实 Snap/AppArmor 和真实 systemd 安装仍不在当前云机器的验证范围内。
+
+WebSocket 功能套件通过真实 TCP 代理限制测试流量，30 路总预算为下载 120 Mbps / 上传 60 Mbps，避免 DevTools 观察二进制帧本身造成大量数据搬运。这些结果用于连接、计量和界面验证，**不是服务器容量基准**。另以 5/2 Mbps 的真实传输预算和 150 ms 控制请求延迟测试默认 8 路，测得下载 4.515 Mbps、上传 2.097 Mbps、空闲 HTTP RTT 153 ms；这不是物理 TCP ACK RTT 模拟。
+
+主要工件位于 `/workspace/shared/testspeed-v011-final-websocket/`、`/workspace/shared/testspeed-v011-final-ui/`、`/workspace/shared/testspeed-v011-http-network/` 和 `/workspace/shared/testspeed-v011-validation/`。GitHub Actions 会另行执行跨平台编译、容器、完整 HTTP 流程与限速检查，结果以对应运行记录为准。
+
+## v0.1.0：历史 HTTP 模式记录
 
 2026-10-11 在当前 Linux 云环境完成以下验证。运行时为 Go 1.27.2、Node.js 26.11.1；Playwright 使用 Chromium 154。实例有 5 个可用 CPU 核心，最终容器为 `testspeed-testspeed-1`，镜像 ID 前缀 `9fe4dede`。
 

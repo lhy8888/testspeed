@@ -32,6 +32,7 @@ type Config struct {
 	MeasurementOrigins    []string
 	MaxTestStreams        int
 	UploadSessionLimit    int
+	TestTransport         string
 }
 
 func loadConfig() (Config, error) {
@@ -45,9 +46,12 @@ func loadConfig() (Config, error) {
 		DownloadDurationMS:    10000,
 		UploadDurationMS:      10000,
 		WarmupMS:              1500,
-		MeasurementPorts:      []string{"8081", "8082", "8083", "8084"},
-		MaxTestStreams:        24,
+		MaxTestStreams:        30,
 		UploadSessionLimit:    256,
+		TestTransport:         envDefault("TEST_TRANSPORT", "websocket"),
+	}
+	if config.TestTransport != "websocket" && config.TestTransport != "http" {
+		return Config{}, fmt.Errorf("TEST_TRANSPORT must be websocket or http")
 	}
 	_, mainPort, err := net.SplitHostPort(config.Addr)
 	if err != nil {
@@ -112,7 +116,7 @@ func loadConfig() (Config, error) {
 		max    int
 	}{
 		{"MAX_CONCURRENT_TEST_REQUESTS", &config.MaxConcurrentRequests, 1, 4096},
-		{"MAX_TEST_STREAMS", &config.MaxTestStreams, 1, 64},
+		{"MAX_TEST_STREAMS", &config.MaxTestStreams, 1, 30},
 		{"UPLOAD_SESSION_LIMIT", &config.UploadSessionLimit, 1, 4096},
 		{"TEST_DOWNLOAD_DURATION_MS", &config.DownloadDurationMS, 1000, 60000},
 		{"TEST_UPLOAD_DURATION_MS", &config.UploadDurationMS, 1000, 60000},
@@ -369,6 +373,8 @@ type features struct {
 }
 
 type performanceSettings struct {
+	Transport          string   `json:"transport"`
+	DefaultStreams     int      `json:"defaultStreams"`
 	MeasurementOrigins []string `json:"measurementOrigins"`
 	MaxStreams         int      `json:"maxStreams"`
 	DefaultMode        string   `json:"defaultMode"`
@@ -386,18 +392,33 @@ type clientConfig struct {
 }
 
 func (config Config) clientConfig(r *http.Request) (clientConfig, error) {
-	_, origins, err := config.origins(r)
+	mainOrigin, origins, err := config.origins(r)
 	if err != nil {
 		return clientConfig{}, err
 	}
 	maxStreams := config.MaxTestStreams
 	if maxStreams == 0 {
-		maxStreams = 24
+		maxStreams = 30
 	}
-	if len(config.MeasurementPorts) == 0 && len(config.MeasurementOrigins) == 0 {
-		// Reserve two HTTP/1.1 connections for loaded latency and session polling.
-		maxStreams = min(maxStreams, 4)
+	maxStreams = min(maxStreams, 30)
+	transport := config.TestTransport
+	if transport == "" {
+		transport = "websocket"
 	}
+	if transport == "http" {
+		// Reserve control connections on the website origin; dedicated origins
+		// can use all six slots in the browser's HTTP/1.1 connection pool.
+		capacity := 0
+		for _, origin := range origins {
+			if origin == mainOrigin {
+				capacity += 4
+			} else {
+				capacity += 6
+			}
+		}
+		maxStreams = min(maxStreams, capacity)
+	}
+	defaultStreams := min(8, maxStreams)
 	return clientConfig{
 		ProtocolVersion: 2,
 		Nodes: []nodeInfo{{
@@ -405,12 +426,12 @@ func (config Config) clientConfig(r *http.Request) (clientConfig, error) {
 		}},
 		Test: testSettings{
 			DownloadDurationMS: config.DownloadDurationMS, UploadDurationMS: config.UploadDurationMS,
-			WarmupMS: config.WarmupMS, MinStreams: min(2, maxStreams), MaxStreams: maxStreams, PingSamples: 8,
+			WarmupMS: config.WarmupMS, MinStreams: defaultStreams, MaxStreams: maxStreams, PingSamples: 8,
 			DownloadChunkBytes: defaultDownloadBytes, UploadChunkBytes: 1 << 20,
 			MaxUploadChunkBytes: 8 << 20,
 		},
 		Performance: performanceSettings{
-			MeasurementOrigins: origins, MaxStreams: maxStreams, DefaultMode: "auto",
+			MeasurementOrigins: origins, MaxStreams: maxStreams, DefaultMode: "manual", Transport: transport, DefaultStreams: defaultStreams,
 			DownloadBlockBytes: 25 << 20, UploadBlockBytes: 25 << 20, MaxUploadBodyBytes: 1 << 30,
 		},
 		Features: features{Download: true, Upload: true, Latency: true, LoadedLatency: true},

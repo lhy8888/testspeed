@@ -23,6 +23,7 @@ try {
     await page.waitForFunction(() => !document.querySelector('#start-button').disabled);
     const config = await (await context.request.get(`${baseURL}/api/config`)).json();
     assert.equal(config.protocolVersion, 2);
+    assert.equal(config.performance.transport, 'http', 'this CDP accuracy suite requires the explicit HTTP fixture; it does not validate WebSocket bandwidth shaping');
     assert.ok(config.performance.measurementOrigins.length >= 4);
     const network = await shapeWorkerNetwork(context, page, shape);
     try {

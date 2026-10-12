@@ -31,7 +31,8 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.2'
-          cache: false # Standard-library-only module; there is no go.sum.
+          cache: true
+          cache-dependency-path: go.sum
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '26.11.1'
@@ -78,7 +79,8 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.27.2'
-          cache: false
+          cache: true
+          cache-dependency-path: go.sum
       - name: Compile application and native throughput client
         env:
           GOOS: ${{ matrix.os }}
@@ -107,7 +109,7 @@ jobs:
   container-browser:
     name: Scratch container and real Chromium measurements
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       BASE_URL: http://127.0.0.1:8080
       TEST_ARTIFACT_DIR: ${{ github.workspace }}/artifacts/browser
@@ -131,27 +133,76 @@ jobs:
         run: |
           mkdir -p "$TEST_ARTIFACT_DIR"
           docker build --tag testspeed:ci . 2>&1 | tee "$TEST_ARTIFACT_DIR/docker-build.log"
-      - name: Start read-only non-root container and check protocol v2
+      - name: Verify normal Compose and Snap override on standard Docker
+        run: python3 tools/verify-compose.py 2>&1 | tee "$TEST_ARTIFACT_DIR/compose-snap-validation.log"
+      - name: Start default single-port WebSocket container and check protocol v2
         run: |
-          docker run --detach --name testspeed-ci --read-only --cap-drop ALL --security-opt no-new-privileges --publish 127.0.0.1:8080-8084:8080-8084 testspeed:ci
+          docker run --detach --name testspeed-ci --read-only --cap-drop ALL --security-opt no-new-privileges --publish 127.0.0.1:8080:8080 testspeed:ci
           test "$(docker inspect --format '{{.Config.User}}' testspeed-ci)" = '65532:65532'
           test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' testspeed-ci)" = true
           for attempt in {1..30}; do
-            if curl --fail --silent "$BASE_URL/healthz" > "$TEST_ARTIFACT_DIR/health.json"; then break; fi
+            if curl --fail --silent --connect-timeout 1 --max-time 2 "$BASE_URL/healthz" > "$TEST_ARTIFACT_DIR/health.json"; then break; fi
             printf 'Waiting for testspeed readiness (%s/30)\n' "$attempt"
             sleep 1
           done
+          curl --fail --silent --show-error --connect-timeout 1 --max-time 2 "$BASE_URL/healthz" > "$TEST_ARTIFACT_DIR/health.json"
           python3 tools/readiness.py | tee "$TEST_ARTIFACT_DIR/readiness.log"
-      - name: Browser flows, concurrency, mobile and cancellation
+      - name: Start optional HTTP multi-port fixture
+        run: |
+          docker run --detach --name testspeed-http-ci --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --env TEST_TRANSPORT=http --env MEASUREMENT_PORTS=8081,8082,8083,8084 --env MAX_TEST_STREAMS=24 \
+            --env PUBLIC_ORIGIN=http://127.0.0.1:9480 \
+            --env MEASUREMENT_ORIGINS=http://127.0.0.1:9481,http://127.0.0.1:9482,http://127.0.0.1:9483,http://127.0.0.1:9484 \
+            --publish 127.0.0.1:9480-9484:8080-8084 testspeed:ci
+          test "$(docker inspect --format '{{.Config.User}}' testspeed-http-ci)" = '65532:65532'
+          test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' testspeed-http-ci)" = true
+          for attempt in {1..30}; do
+            if curl --fail --silent --connect-timeout 1 --max-time 2 http://127.0.0.1:9480/healthz > "$TEST_ARTIFACT_DIR/http-health.json"; then break; fi
+            printf 'Waiting for HTTP testspeed readiness (%s/30)\n' "$attempt"
+            sleep 1
+          done
+          curl --fail --silent --show-error --connect-timeout 1 --max-time 2 http://127.0.0.1:9480/healthz > "$TEST_ARTIFACT_DIR/http-health.json"
+          BASE_URL=http://127.0.0.1:9480 TEST_TRANSPORT=http EXPECTED_MAX_STREAMS=24 EXPECTED_ORIGIN_COUNT=4 python3 tools/readiness.py | tee "$TEST_ARTIFACT_DIR/http-readiness.log"
+      - name: Start optional HTTP single-port fixture
+        run: |
+          docker run --detach --name testspeed-single-port-ci --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --env TEST_TRANSPORT=http --env MEASUREMENT_PORTS= --env MAX_TEST_STREAMS=4 \
+            --env PUBLIC_ORIGIN=http://127.0.0.1:9490 --publish 127.0.0.1:9490:8080 testspeed:ci
+          test "$(docker inspect --format '{{.Config.User}}' testspeed-single-port-ci)" = '65532:65532'
+          test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' testspeed-single-port-ci)" = true
+          for attempt in {1..30}; do
+            if curl --fail --silent --connect-timeout 1 --max-time 2 http://127.0.0.1:9490/healthz > "$TEST_ARTIFACT_DIR/single-port-health.json"; then break; fi
+            printf 'Waiting for single-port testspeed readiness (%s/30)\n' "$attempt"
+            sleep 1
+          done
+          curl --fail --silent --show-error --connect-timeout 1 --max-time 2 http://127.0.0.1:9490/healthz > "$TEST_ARTIFACT_DIR/single-port-health.json"
+          BASE_URL=http://127.0.0.1:9490 TEST_TRANSPORT=http EXPECTED_MAX_STREAMS=4 EXPECTED_ORIGIN_COUNT=1 python3 tools/readiness.py | tee "$TEST_ARTIFACT_DIR/single-port-readiness.log"
+      - name: Browser default WebSocket transport, 8 streams and real TCP concurrency
+        run: node tests/browser-websocket.mjs 2>&1 | tee "$TEST_ARTIFACT_DIR/browser-websocket.log"
+      - name: Browser interface, language switching and default single-port behavior
+        run: node tests/browser-ui.mjs 2>&1 | tee "$TEST_ARTIFACT_DIR/browser-ui.log"
+      - name: Browser optional HTTP network reachability and single-port fallback
+        env:
+          MULTIPORT_BASE_URL: http://127.0.0.1:9480
+          SINGLEPORT_BASE_URL: http://127.0.0.1:9490
+        run: node tests/browser-network-access.mjs 2>&1 | tee "$TEST_ARTIFACT_DIR/browser-network-access.log"
+      - name: Browser optional HTTP flows, concurrency, mobile and cancellation
+        env:
+          BASE_URL: http://127.0.0.1:9480
+          SMOKE_STREAM_COUNTS: '1,4,12,24'
         run: node tests/browser-smoke.mjs 2>&1 | tee "$TEST_ARTIFACT_DIR/browser-smoke.log"
-      - name: Browser accuracy at 80, 150 and 300 ms HTTP latency
+      - name: Browser optional HTTP accuracy at 80, 150 and 300 ms latency
+        env:
+          BASE_URL: http://127.0.0.1:9480
         run: node tests/browser-accuracy.mjs 2>&1 | tee "$TEST_ARTIFACT_DIR/browser-accuracy.log"
-      - name: Collect container logs and stop test service
+      - name: Collect container logs and stop three known CI test services
         if: always()
         run: |
           mkdir -p "$TEST_ARTIFACT_DIR"
-          docker logs testspeed-ci > "$TEST_ARTIFACT_DIR/container.log" 2>&1 || true
-          docker rm --force testspeed-ci || true
+          for container in testspeed-ci testspeed-http-ci testspeed-single-port-ci; do
+            docker logs "$container" > "$TEST_ARTIFACT_DIR/$container.log" 2>&1 || true
+            docker rm --force "$container" || true
+          done
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

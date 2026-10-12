@@ -23,7 +23,7 @@ func clearConfigEnv(t *testing.T) {
 		"TLS_CERT_FILE", "TLS_KEY_FILE", "TEST_DOWNLOAD_DURATION_MS",
 		"TEST_UPLOAD_DURATION_MS", "TEST_WARMUP_MS",
 		"MEASUREMENT_PORTS", "PUBLIC_ORIGIN", "MEASUREMENT_ORIGINS",
-		"MAX_TEST_STREAMS", "UPLOAD_SESSION_LIMIT",
+		"MAX_TEST_STREAMS", "UPLOAD_SESSION_LIMIT", "TEST_TRANSPORT",
 	} {
 		t.Setenv(name, "")
 	}
@@ -40,7 +40,7 @@ func TestLoadConfigDefaultsAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Addr != ":8080" || config.NodeID != "local" || config.MaxConcurrentRequests != 128 || config.DownloadDurationMS != 10000 || config.WarmupMS != 1500 || config.MaxTestStreams != 24 || config.UploadSessionLimit != 256 || !reflect.DeepEqual(config.MeasurementPorts, []string{"8081", "8082", "8083", "8084"}) {
+	if config.Addr != ":8080" || config.NodeID != "local" || config.MaxConcurrentRequests != 128 || config.DownloadDurationMS != 10000 || config.WarmupMS != 1500 || config.MaxTestStreams != 30 || config.UploadSessionLimit != 256 || len(config.MeasurementPorts) != 0 || config.TestTransport != "websocket" {
 		t.Fatalf("unexpected default config: %+v", config)
 	}
 	t.Setenv("ADDR", "127.0.0.1:9090")
@@ -53,13 +53,13 @@ func TestLoadConfigDefaultsAndOverrides(t *testing.T) {
 	t.Setenv("TEST_UPLOAD_DURATION_MS", "3000")
 	t.Setenv("TEST_WARMUP_MS", "1000")
 	t.Setenv("MEASUREMENT_PORTS", "9091, 9092")
-	t.Setenv("MAX_TEST_STREAMS", "32")
+	t.Setenv("MAX_TEST_STREAMS", "30")
 	t.Setenv("UPLOAD_SESSION_LIMIT", "128")
 	config, err = loadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Addr != "127.0.0.1:9090" || config.NodeID != "office" || config.NodeName != "企业内网节点" || config.MaxConcurrentRequests != 12 || config.TLSKeyFile != "/tmp/key.pem" || config.DownloadDurationMS != 3000 || config.WarmupMS != 1000 || config.MaxTestStreams != 32 || config.UploadSessionLimit != 128 || !reflect.DeepEqual(config.MeasurementPorts, []string{"9091", "9092"}) {
+	if config.Addr != "127.0.0.1:9090" || config.NodeID != "office" || config.NodeName != "企业内网节点" || config.MaxConcurrentRequests != 12 || config.TLSKeyFile != "/tmp/key.pem" || config.DownloadDurationMS != 3000 || config.WarmupMS != 1000 || config.MaxTestStreams != 30 || config.UploadSessionLimit != 128 || !reflect.DeepEqual(config.MeasurementPorts, []string{"9091", "9092"}) {
 		t.Fatalf("overrides were not applied: %+v", config)
 	}
 }
@@ -81,7 +81,6 @@ func TestLoadConfigRejectsInvalidDeploymentSettings(t *testing.T) {
 		{"NODE_ID", "node\nother"},
 		{"ADDR", "127.0.0.1"},
 		{"ADDR", ":0"},
-		{"ADDR", ":8081"},
 		{"MEASUREMENT_PORTS", "8080"},
 		{"MEASUREMENT_PORTS", "8081,08081"},
 		{"MEASUREMENT_PORTS", "0"},
@@ -89,7 +88,8 @@ func TestLoadConfigRejectsInvalidDeploymentSettings(t *testing.T) {
 		{"MEASUREMENT_PORTS", "8081,"},
 		{"MEASUREMENT_PORTS", "+8081"},
 		{"MAX_TEST_STREAMS", "0"},
-		{"MAX_TEST_STREAMS", "65"},
+		{"MAX_TEST_STREAMS", "31"},
+		{"TEST_TRANSPORT", "unknown"},
 		{"UPLOAD_SESSION_LIMIT", "0"},
 		{"PUBLIC_ORIGIN", "https://example.com/path"},
 		{"MEASUREMENT_ORIGINS", "https://measure.example.com"},
@@ -115,13 +115,14 @@ func TestClientConfigPerformanceAndSinglePortFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if client.ProtocolVersion != 2 || client.Nodes[0].BaseURL != "" || client.Test.MinStreams != 2 || client.Test.MaxStreams != 24 || client.Performance.MaxStreams != 24 || client.Performance.DefaultMode != "auto" || client.Performance.DownloadBlockBytes != 25<<20 || client.Performance.UploadBlockBytes != 25<<20 || client.Performance.MaxUploadBodyBytes != 1<<30 {
+	if client.ProtocolVersion != 2 || client.Nodes[0].BaseURL != "" || client.Test.MinStreams != 8 || client.Test.MaxStreams != 30 || client.Performance.MaxStreams != 30 || client.Performance.DefaultMode != "manual" || client.Performance.DefaultStreams != 8 || client.Performance.Transport != "websocket" || client.Performance.DownloadBlockBytes != 25<<20 || client.Performance.UploadBlockBytes != 25<<20 || client.Performance.MaxUploadBodyBytes != 1<<30 {
 		t.Fatalf("unexpected performance protocol: %+v", client)
 	}
-	if !reflect.DeepEqual(client.Performance.MeasurementOrigins, []string{"http://example.com:8081", "http://example.com:8082", "http://example.com:8083", "http://example.com:8084"}) {
+	if !reflect.DeepEqual(client.Performance.MeasurementOrigins, []string{"http://example.com:8080"}) {
 		t.Fatalf("unexpected measurement origins: %v", client.Performance.MeasurementOrigins)
 	}
 	t.Setenv("MEASUREMENT_PORTS", "")
+	t.Setenv("TEST_TRANSPORT", "http")
 	config, err = loadConfig()
 	if err != nil {
 		t.Fatal(err)
@@ -132,6 +133,15 @@ func TestClientConfigPerformanceAndSinglePortFallback(t *testing.T) {
 	}
 	if len(config.MeasurementPorts) != 0 || client.Test.MaxStreams != 4 || client.Performance.MaxStreams != 4 || !reflect.DeepEqual(client.Performance.MeasurementOrigins, []string{"http://example.com:8080"}) {
 		t.Fatalf("unexpected single origin fallback: %+v", client)
+	}
+	t.Setenv("MEASUREMENT_PORTS", "8081,8082,8083,8084")
+	config, err = loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err = config.clientConfig(r)
+	if err != nil || client.Performance.MaxStreams != 24 {
+		t.Fatalf("HTTP origin capacity: %+v %v", client, err)
 	}
 	t.Setenv("MAX_TEST_STREAMS", "1")
 	config, err = loadConfig()
@@ -203,7 +213,7 @@ func TestExplicitOriginsAndPublicWebsiteOverride(t *testing.T) {
 		t.Fatalf("explicit origins were not applied: main=%q origins=%v err=%v", main, origins, err)
 	}
 	client, err := config.clientConfig(r)
-	if err != nil || client.Performance.MaxStreams != 24 {
+	if err != nil || client.Performance.MaxStreams != 30 {
 		t.Fatalf("external measurement origins incorrectly disabled parallelism: %+v %v", client, err)
 	}
 	for _, value := range []string{"https://data.example.com,", "https://DATA.example.com,https://data.example.com:443", "https://data.example.com/path"} {

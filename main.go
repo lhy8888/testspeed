@@ -21,6 +21,10 @@ import (
 var embeddedWeb embed.FS
 
 func main() {
+	if len(os.Args) == 2 && (os.Args[1] == "--version" || os.Args[1] == "-version") {
+		printVersion(os.Stdout)
+		return
+	}
 	if err := run(); err != nil {
 		slog.Error("server stopped", "error", err)
 		os.Exit(1)
@@ -75,6 +79,8 @@ func run() error {
 	case <-ctx.Done():
 	}
 	slog.Info("shutting down speed node")
+	// net/http Shutdown does not close hijacked WebSocket connections.
+	handler.closeWebSockets()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	shutdownServers(shutdownCtx, servers)

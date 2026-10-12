@@ -21,14 +21,34 @@ def request(path, data=None, method=None, headers=None):
 with request(base + "/healthz") as response:
     assert json.load(response)["status"] == "ok"
 with request(base + "/") as response:
-    assert "轻测速" in response.read().decode()
+    page = response.read().decode()
+    assert 'id="download-value"' in page
+    assert 'id="more-info-button"' in page
+    assert 'src="app.js"' in page or 'src="/app.js"' in page
 with request(base + "/api/config") as response:
     config = json.load(response)
     assert config["protocolVersion"] == 2
     assert len(config["nodes"]) == 1
-    assert config["performance"]["maxStreams"] == 24
-    measurement_origins = config["performance"]["measurementOrigins"]
-    assert len(measurement_origins) == 4
+    performance = config["performance"]
+    transport = os.environ.get("TEST_TRANSPORT", "websocket")
+    assert transport in ("websocket", "http")
+    assert performance["transport"] == transport
+    assert performance["defaultMode"] == "manual"
+    maximum_streams = performance["maxStreams"]
+    assert 1 <= maximum_streams <= 30
+    assert performance["defaultStreams"] == min(8, maximum_streams)
+    measurement_origins = performance["measurementOrigins"]
+    assert measurement_origins and len(set(measurement_origins)) == len(measurement_origins)
+    if transport == "websocket":
+        assert measurement_origins == [origin]
+        assert maximum_streams == int(os.environ.get("EXPECTED_MAX_STREAMS", "30"))
+    else:
+        capacity = sum(4 if measurement_origin == origin else 6 for measurement_origin in measurement_origins)
+        assert maximum_streams <= capacity
+    if "EXPECTED_MAX_STREAMS" in os.environ:
+        assert maximum_streams == int(os.environ["EXPECTED_MAX_STREAMS"])
+    if "EXPECTED_ORIGIN_COUNT" in os.environ:
+        assert len(measurement_origins) == int(os.environ["EXPECTED_ORIGIN_COUNT"])
 
 for measurement_origin in measurement_origins:
     with request(
@@ -70,4 +90,4 @@ finally:
     with request(base + "/api/upload-sessions/" + session_id, method="DELETE") as response:
         assert response.status == 204
 
-print("testspeed protocol v2 functional readiness passed")
+print(f"testspeed protocol v2 {transport} configuration and HTTP diagnostic readiness passed")

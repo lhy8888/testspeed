@@ -4,12 +4,18 @@ set -euo pipefail
 repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repository_root"
 
-for required_file in README.md deploy/testspeed.service deploy/testspeed.env.example; do
+for required_file in README.md deploy/testspeed.service deploy/testspeed.env.example deploy/manage.sh docs/deployment.md; do
   if [[ ! -f "$required_file" ]]; then
     printf 'Missing package file: %s\n' "$required_file" >&2
     exit 1
   fi
 done
+
+release_version=${RELEASE_TAG:-development}
+if [[ "$release_version" != development && ! "$release_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  printf 'Invalid stable release version: %s\n' "$release_version" >&2
+  exit 1
+fi
 
 distribution_directory="$repository_root/artifacts/dist"
 staging_directory="$repository_root/bin/release"
@@ -41,19 +47,22 @@ for target in "${targets[@]}"; do
 
   printf 'Building %s\n' "$package_name"
   CGO_ENABLED=0 GOOS="$target_os" GOARCH="$target_architecture" \
-    go build -trimpath -ldflags='-s -w' -o "$package_directory/$application_name" .
+    go build -trimpath -ldflags="-s -w -X main.version=$release_version" -o "$package_directory/$application_name" .
   CGO_ENABLED=0 GOOS="$target_os" GOARCH="$target_architecture" \
     go build -trimpath -ldflags='-s -w' -o "$package_directory/$client_name" ./tools/throughput
 
   cp README.md "$package_directory/README.md"
   cp deploy/testspeed.service "$package_directory/testspeed.service"
   cp deploy/testspeed.env.example "$package_directory/testspeed.env.example"
-  chmod 755 "$package_directory/$application_name" "$package_directory/$client_name"
-  chmod 644 "$package_directory/README.md" "$package_directory/testspeed.service" "$package_directory/testspeed.env.example"
+  cp deploy/manage.sh "$package_directory/manage.sh"
+  cp docs/deployment.md "$package_directory/deployment.md"
+  printf '%s\n' "$release_version" > "$package_directory/VERSION"
+  chmod 755 "$package_directory/$application_name" "$package_directory/$client_name" "$package_directory/manage.sh"
+  chmod 644 "$package_directory/README.md" "$package_directory/testspeed.service" "$package_directory/testspeed.env.example" "$package_directory/deployment.md" "$package_directory/VERSION"
 
   archive_name="$package_name.tar.gz"
   tar -czf "$distribution_directory/$archive_name" -C "$package_directory" \
-    "$application_name" "$client_name" README.md testspeed.service testspeed.env.example
+    "$application_name" "$client_name" README.md testspeed.service testspeed.env.example manage.sh deployment.md VERSION
   archives+=("$archive_name")
 done
 

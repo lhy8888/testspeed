@@ -1,0 +1,87 @@
+@charset "UTF-8";
+:root { color-scheme: light; font-family: Arial, "PingFang SC", "Microsoft YaHei", sans-serif; color: #1a1a1a; background: #fff; font-synthesis: none; -webkit-font-smoothing: antialiased; --green: #07844b; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+a { color: var(--green); text-underline-offset: 3px; }
+button { font: inherit; cursor: pointer; }
+button, a, summary { -webkit-tap-highlight-color: transparent; }
+button:focus-visible, a:focus-visible, summary:focus-visible, pre:focus-visible { outline: 3px solid #58a77d; outline-offset: 4px; }
+[hidden] { display: none !important; }
+.skip-link { position: fixed; top: -70px; left: 20px; z-index: 10; padding: 12px 18px; background: #fff; border: 1px solid #ddd; }
+.skip-link:focus { top: 12px; }
+.page-header { display: flex; align-items: center; justify-content: space-between; width: min(1080px, calc(100% - 64px)); margin: 0 auto; padding: 31px 0; border-bottom: 1px solid #ededed; }
+.brand { color: #e32529; font-size: 21px; font-weight: 800; letter-spacing: 1.7px; text-decoration: none; }
+.back-link { color: #666; font-size: 13px; text-decoration: none; }
+.back-link:hover { color: #111; }
+.page-layout { display: grid; grid-template-columns: 165px minmax(0, 1fr); gap: 57px; width: min(1080px, calc(100% - 64px)); margin: 57px auto 0; }
+.side-nav { align-self: start; display: grid; gap: 17px; position: sticky; top: 30px; font-size: 12px; }
+.nav-label { color: #aaa; font-size: 11px; margin-bottom: 7px; }
+.side-nav a { color: #777; text-decoration: none; line-height: 1.6; }
+.side-nav a:hover { color: var(--green); }
+main { min-width: 0; }
+.intro { margin-bottom: 47px; }
+.eyebrow { color: #888; font-size: 12px; margin: 0 0 17px; }
+h1 { font-size: clamp(28px, 3.5vw, 40px); font-weight: 500; line-height: 1.4; letter-spacing: -.5px; margin: 0; }
+.intro-text { font-size: 15px; color: #777; max-width: 610px; margin-top: 16px; }
+.default-tags { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 24px; }
+.default-tags span { border: 1px solid #e8e8e8; padding: 7px 10px; font-size: 11px; color: #777; }
+section { padding: 32px 0; border-top: 1px solid #e8e8e8; scroll-margin-top: 24px; }
+h2 { font-size: 20px; font-weight: 500; margin: 0 0 18px; }
+p { font-size: 13px; color: #666; line-height: 1.95; margin: 14px 0; }
+.section-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 14px; }
+.recommendation { color: var(--green); font-size: 11px; }
+code { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; font-size: .92em; overflow-wrap: anywhere; color: #343434; }
+.command-block { background: #f8f9f8; border: 1px solid #e9ece9; margin: 19px 0; min-width: 0; }
+.command-block.featured { border-color: #d6e6dc; background: #f6faf7; }
+.command-heading { display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 13px 16px 0; color: #888; font-size: 11px; }
+.copy-button { flex-shrink: 0; min-height: 30px; border: 1px solid #d3ded7; background: #fff; color: var(--green); font-size: 11px; padding: 5px 10px; }
+.copy-button:hover { background: #f1f7f3; }
+.copy-button:disabled { cursor: wait; opacity: .6; }
+pre { margin: 13px 0 0; padding: 0 16px 16px; font-size: 12px; line-height: 1.9; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+pre code { font-size: inherit; }
+.command-note { margin: -3px 16px 14px; font-size: 11px; color: #888; }
+.copy-feedback { color: var(--green); font-size: 11px; margin: 0 16px; min-height: 0; }
+.copy-feedback:not(:empty) { padding-bottom: 12px; }
+.command-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; margin: 21px 0; }
+.command-grid .command-block { margin: 0; }
+.small-note { color: #888; font-size: 11px; line-height: 1.9; }
+.open-address { display: flex; flex-wrap: wrap; gap: 12px 19px; align-items: center; padding: 14px 0 5px; }
+.open-address code { font-size: 16px; color: var(--green); }
+.open-address span { color: #999; font-size: 11px; }
+.foldout { border-top: 1px solid #e8e8e8; margin-top: 18px; }
+.foldout > summary { cursor: pointer; padding: 18px 0 0; font-size: 13px; color: #555; list-style: none; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.foldout > summary::-webkit-details-marker { display: none; }
+.foldout > summary::after { content: "+"; font-size: 18px; color: #999; }
+.foldout[open] > summary::after { content: "−"; }
+.foldout-body { margin-top: 14px; }
+.path-list { margin: 0; }
+.path-list > div { display: grid; grid-template-columns: 130px minmax(0, 1fr); gap: 15px; padding: 13px 0; border-bottom: 1px solid #f0f0f0; }
+.path-list dt { color: #777; font-size: 12px; }
+.path-list dd { margin: 0; font-size: 12px; }
+.resource-links { display: grid; gap: 0; }
+.resource-links a { display: flex; justify-content: space-between; gap: 15px; color: #555; text-decoration: none; padding: 14px 0; font-size: 13px; border-bottom: 1px solid #efefef; }
+.resource-links a:hover { color: var(--green); }
+.resource-links span { color: #aaa; }
+.page-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; color: #aaa; font-size: 11px; padding: 35px 0 43px; border-top: 1px solid #e8e8e8; }
+.page-footer a { color: #888; text-decoration: none; }
+@media (max-width: 800px) {
+  .page-layout { grid-template-columns: 1fr; gap: 27px; margin-top: 30px; }
+  .side-nav { position: static; display: flex; flex-wrap: wrap; gap: 13px 20px; padding-bottom: 18px; border-bottom: 1px solid #eee; }
+  .nav-label { display: none; }
+  .intro { margin-bottom: 29px; }
+}
+@media (max-width: 520px) {
+  .page-header, .page-layout { width: calc(100% - 36px); }
+  .page-header { padding: 23px 0; }
+  .brand { font-size: 18px; }
+  .back-link { font-size: 12px; }
+  .side-nav { font-size: 11px; gap: 12px 18px; }
+  .command-grid { grid-template-columns: 1fr; }
+  h2 { font-size: 18px; }
+  section { padding: 26px 0; }
+  .recommendation { font-size: 10px; }
+  .path-list > div { grid-template-columns: 1fr; gap: 8px; }
+  pre { font-size: 11px; padding-left: 13px; padding-right: 13px; }
+  .command-heading { padding-left: 13px; padding-right: 13px; }
+}
+@media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }

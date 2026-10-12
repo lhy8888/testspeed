@@ -1,0 +1,5 @@
+# Docker Snap cannot launch containers with no-new-privileges (LP #1908448).
+# Use this override only with Docker installed through Snap.
+services:
+  testspeed:
+    security_opt: !reset []

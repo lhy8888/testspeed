@@ -1,0 +1,13 @@
+# Optional HTTP transport with four independent measurement connection pools.
+# docker compose -f compose.yaml -f compose.http.yaml up --build --detach
+services:
+  testspeed:
+    ports:
+      - "8081:8081"
+      - "8082:8082"
+      - "8083:8083"
+      - "8084:8084"
+    environment:
+      TEST_TRANSPORT: "http"
+      MEASUREMENT_PORTS: "8081,8082,8083,8084"
+      MAX_TEST_STREAMS: "24"

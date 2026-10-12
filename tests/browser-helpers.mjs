@@ -16,6 +16,51 @@ export async function launchBrowser() {
   });
 }
 
+// A Playwright route enables Fetch interception for every request, including
+// large upload bodies. DevTools URL blocking leaves healthy uploads untouched.
+export async function blockWorkerURLs(context, page, urls) {
+  const cdp = await context.newCDPSession(page);
+  const failures = [];
+  const workerErrors = [];
+  const pending = new Map();
+  let nextCommand = 1;
+  function workerCommand(sessionId, method, params = {}) {
+    const id = nextCommand++;
+    return new Promise((resolve, reject) => {
+      pending.set(id, { resolve, reject });
+      cdp.send('Target.sendMessageToTarget', { sessionId, message: JSON.stringify({ id, method, params }) }).catch(error => {
+        pending.delete(id);
+        reject(error);
+      });
+    });
+  }
+  cdp.on('Target.receivedMessageFromTarget', ({ message }) => {
+    const packet = JSON.parse(message);
+    if (packet.id && pending.has(packet.id)) {
+      const command = pending.get(packet.id);
+      pending.delete(packet.id);
+      if (packet.error) command.reject(new Error(packet.error.message));
+      else command.resolve(packet.result);
+    } else if (packet.method === 'Network.loadingFailed') failures.push(packet.params);
+  });
+  cdp.on('Target.attachedToTarget', async ({ sessionId, targetInfo }) => {
+    if (targetInfo.type !== 'worker') return;
+    try {
+      await workerCommand(sessionId, 'Network.enable', { maxPostDataSize: 0 });
+      await workerCommand(sessionId, 'Network.setBlockedURLs', { urls });
+    } catch (error) {
+      workerErrors.push(error.message);
+    } finally {
+      await workerCommand(sessionId, 'Runtime.runIfWaitingForDebugger').catch(error => workerErrors.push(error.message));
+    }
+  });
+  await cdp.send('Network.enable', { maxPostDataSize: 0 });
+  cdp.on('Network.loadingFailed', event => failures.push(event));
+  await cdp.send('Network.setBlockedURLs', { urls });
+  await cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: false, filter: [{ type: 'worker', exclude: false }, { exclude: true }] });
+  return { cdp, failures, workerErrors };
+}
+
 // Worker Network.emulateNetworkConditions is unsupported in Chromium. A global
 // URL rule on the owning page applies to its network factories, including its
 // dedicated worker. Worker protocol events separately prove where bytes move.
@@ -97,6 +142,7 @@ export async function readMetrics(page) {
       downloadMbps: numeric('download-value'), uploadMbps: numeric('upload-value'),
       idleMs: numeric('idle-latency-value'), jitterMs: numeric('jitter-value'),
       downloadLoadedMs: numeric('download-loaded-value'), uploadLoadedMs: numeric('upload-loaded-value'),
+      failureRate: document.getElementById('failure-rate-value') ? numeric('failure-rate-value') : undefined,
       streams: document.getElementById('streams-value')?.textContent,
       tcp: document.getElementById('tcp-value')?.textContent,
       tcpDetails: { ...document.getElementById('tcp-value')?.dataset },
@@ -105,8 +151,17 @@ export async function readMetrics(page) {
   });
 }
 
+export async function openDetails(page) {
+  const toggle = page.locator('#more-info-button');
+  if (await toggle.count() && await toggle.getAttribute('aria-expanded') !== 'true') await toggle.click();
+}
+
 export async function waitPhase(page, text, timeout = 90000) {
-  await page.waitForFunction(expected => document.querySelector('#phase-label').textContent.includes(expected) || !document.querySelector('#error-message').hidden, text, { timeout });
-  const state = await page.evaluate(() => ({ phase: document.querySelector('#phase-label').textContent, error: document.querySelector('#error-message').textContent }));
-  if (!state.phase.includes(text)) throw new Error(`Expected phase ${text}; got ${state.phase}: ${state.error}`);
+  const phaseKey = { '正在测量下载': 'download', '正在测量上传': 'upload', '测速完成': 'complete', '测速已停止': 'stopped', '正在连接': 'latency', '准备就绪': 'ready' }[text];
+  await page.waitForFunction(({ expected, phaseKey }) => {
+    const phase = document.querySelector('#phase-label');
+    return (phaseKey && phase.dataset.phase === phaseKey) || phase.textContent.includes(expected) || !document.querySelector('#error-message').hidden;
+  }, { expected: text, phaseKey }, { timeout });
+  const state = await page.evaluate(() => ({ phase: document.querySelector('#phase-label').textContent, key: document.querySelector('#phase-label').dataset.phase, error: document.querySelector('#error-message').textContent }));
+  if (!(phaseKey && state.key === phaseKey) && !state.phase.includes(text)) throw new Error(`Expected phase ${text}; got ${state.phase}: ${state.error}`);
 }

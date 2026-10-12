@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#ffffff">
+    <meta name="description" content="TESTSPEED 独立部署教程：安装、更新、查看日志和卸载。">
+    <title>TESTSPEED · 部署与维护</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/deploy.css">
+    <script src="/deploy.js" type="module"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#install">跳到安装步骤</a>
+    <header class="page-header">
+      <a class="brand" href="/">TESTSPEED</a>
+      <a class="back-link" href="/">← 返回测速</a>
+    </header>
+    <div class="page-layout">
+      <aside class="side-nav" aria-label="教程导航">
+        <span class="nav-label">部署与维护</span>
+        <a href="#install">安装到服务器</a>
+        <a href="#maintenance">更新与日常维护</a>
+        <a href="#paths">文件在哪里</a>
+        <a href="#docker">Docker 部署</a>
+        <a href="#help">文档与下载</a>
+      </aside>
+      <main>
+        <div class="intro">
+          <p class="eyebrow">部署教程 · v0.1.1</p>
+          <h1>把测速部署到你的服务器</h1>
+          <p class="intro-text">一条命令安装，后续更新和维护也使用同一个管理工具。适用于公网和企业内网。</p>
+          <div class="default-tags"><span>单端口 8080</span><span>默认 8 路并发</span><span>最多 30 路</span></div>
+        </div>
+
+        <section id="install" aria-labelledby="install-title">
+          <div class="section-heading"><h2 id="install-title">安装到服务器</h2><span class="recommendation">推荐 · Linux / systemd</span></div>
+          <p>在目标服务器的终端执行。需要 Linux、systemd、sudo 权限，以及访问 GitHub 的网络；无需安装 Go、Node.js 或 Docker。</p>
+          <div class="command-block featured">
+            <div class="command-heading"><span>首次安装</span><button type="button" class="copy-button" data-copy="install-command" hidden>复制命令</button></div>
+            <pre id="install-command" tabindex="0"><code>curl -fsSL https://raw.githubusercontent.com/lhy8888/testspeed/v0.1.1/deploy/manage.sh | sudo bash -s -- install</code></pre>
+            <p class="copy-feedback" role="status" aria-live="polite"></p>
+          </div>
+          <p>脚本下载并校验安装包，安装网页和服务，创建 systemd 服务并启动。安装后，在浏览器打开：</p>
+          <div class="open-address"><code>http://服务器IP:8080</code><span>替换为客户端可访问的 IP 或域名</span></div>
+          <p class="small-note">防火墙或安全组允许 TCP 8080 即可。网页、下载和上传都使用同一端口。</p>
+          <noscript><p class="small-note">可直接选中下方命令，使用系统复制功能。</p></noscript>
+        </section>
+
+        <section id="maintenance" aria-labelledby="maintenance-title">
+          <h2 id="maintenance-title">更新与日常维护</h2>
+          <p>安装后的管理工具位于 <code>/opt/testspeed/manage.sh</code>。下面的命令都在这台服务器的终端执行。</p>
+          <div class="command-block">
+            <div class="command-heading"><span>更新到最新正式版</span><button type="button" class="copy-button" data-copy="update-command" hidden>复制</button></div>
+            <pre id="update-command" tabindex="0"><code>sudo /opt/testspeed/manage.sh update</code></pre>
+            <p class="command-note">更新会重启服务，保留现有配置文件。</p>
+            <p class="copy-feedback" role="status" aria-live="polite"></p>
+          </div>
+          <div class="command-grid">
+            <div class="command-block"><div class="command-heading"><span>查看状态</span><button type="button" class="copy-button" data-copy="status-command" hidden>复制</button></div><pre id="status-command" tabindex="0"><code>sudo /opt/testspeed/manage.sh status</code></pre><p class="copy-feedback" role="status" aria-live="polite"></p></div>
+            <div class="command-block"><div class="command-heading"><span>查看已安装版本</span><button type="button" class="copy-button" data-copy="version-command" hidden>复制</button></div><pre id="version-command" tabindex="0"><code>sudo /opt/testspeed/manage.sh version</code></pre><p class="copy-feedback" role="status" aria-live="polite"></p></div>
+            <div class="command-block"><div class="command-heading"><span>实时日志</span><button type="button" class="copy-button" data-copy="logs-command" hidden>复制</button></div><pre id="logs-command" tabindex="0"><code>sudo /opt/testspeed/manage.sh logs</code></pre><p class="command-note">按 Ctrl+C 退出日志查看。</p><p class="copy-feedback" role="status" aria-live="polite"></p></div>
+            <div class="command-block"><div class="command-heading"><span>重启服务</span><button type="button" class="copy-button" data-copy="restart-command" hidden>复制</button></div><pre id="restart-command" tabindex="0"><code>sudo /opt/testspeed/manage.sh restart</code></pre><p class="copy-feedback" role="status" aria-live="polite"></p></div>
+            <div class="command-block"><div class="command-heading"><span>停止服务</span><button type="button" class="copy-button" data-copy="stop-command" hidden>复制</button></div><pre id="stop-command" tabindex="0"><code>sudo /opt/testspeed/manage.sh stop</code></pre><p class="copy-feedback" role="status" aria-live="polite"></p></div>
+            <div class="command-block"><div class="command-heading"><span>启用单端口模式</span><button type="button" class="copy-button" data-copy="mode-command" hidden>复制</button></div><pre id="mode-command" tabindex="0"><code>sudo /opt/testspeed/manage.sh mode websocket</code></pre><p class="command-note">升级旧版后使用；保留监听地址和 TLS 配置。</p><p class="copy-feedback" role="status" aria-live="polite"></p></div>
+          </div>
+          <details class="foldout"><summary>安装指定版本或回退</summary><div class="foldout-body">
+            <p><code>update</code> 后可指定版本标签。例如回退到 v0.1.0：</p>
+            <div class="command-block"><div class="command-heading"><span>指定版本</span><button type="button" class="copy-button" data-copy="rollback-command" hidden>复制</button></div><pre id="rollback-command" tabindex="0"><code>sudo /opt/testspeed/manage.sh update v0.1.0</code></pre><p class="copy-feedback" role="status" aria-live="polite"></p></div>
+            <p class="small-note">v0.1.0 使用旧的 HTTP 测速。回退时会保留当前管理脚本，之后仍可用 <code>update</code> 更新。版本标签见 <a href="https://github.com/lhy8888/testspeed/releases">GitHub Releases</a>。</p>
+          </div></details>
+          <details class="foldout"><summary>卸载与配置清理</summary><div class="foldout-body">
+            <p>下面两种卸载方式按需选择一种。卸载会停止服务并移除已安装程序；默认保留配置文件，便于重新安装。</p>
+            <div class="command-block"><div class="command-heading"><span>卸载，保留配置</span><button type="button" class="copy-button" data-copy="uninstall-command" hidden>复制</button></div><pre id="uninstall-command" tabindex="0"><code>sudo /opt/testspeed/manage.sh uninstall</code></pre><p class="copy-feedback" role="status" aria-live="polite"></p></div>
+            <p>如果同时需要删除测速配置，使用：</p>
+            <div class="command-block"><div class="command-heading"><span>卸载并删除配置</span><button type="button" class="copy-button" data-copy="purge-command" hidden>复制</button></div><pre id="purge-command" tabindex="0"><code>sudo /opt/testspeed/manage.sh purge</code></pre><p class="copy-feedback" role="status" aria-live="polite"></p></div>
+            <p class="small-note">清理范围包含 <code>/etc/testspeed/testspeed.env</code>，同目录的证书及其他文件会保留。卸载后本机管理脚本也会被移除。</p>
+          </div></details>
+        </section>
+
+        <section id="paths" aria-labelledby="paths-title">
+          <h2 id="paths-title">文件在哪里</h2>
+          <dl class="path-list"><div><dt>程序与网页</dt><dd><code>/opt/testspeed/testspeed</code></dd></div><div><dt>管理工具</dt><dd><code>/opt/testspeed/manage.sh</code></dd></div><div><dt>服务配置</dt><dd><code>/etc/testspeed/testspeed.env</code></dd></div><div><dt>systemd 服务</dt><dd><code>/etc/systemd/system/testspeed.service</code></dd></div></dl>
+          <p class="small-note">修改配置后重启服务。使用 HTTPS、自定义地址或离线安装时，参照<a href="https://github.com/lhy8888/testspeed/blob/v0.1.1/docs/deployment.md">完整部署文档</a>。</p>
+        </section>
+
+        <section id="docker" aria-labelledby="docker-title">
+          <h2 id="docker-title">已经使用 Docker？</h2>
+          <p>也可使用 Docker Compose 部署。选择一种部署方式，让网页端口供对应服务使用。</p>
+          <details class="foldout"><summary>官方 Docker Engine + Compose</summary><div class="foldout-body">
+            <p>需要 Git、Docker Engine 和 Compose 插件。在服务器上执行：</p>
+            <div class="command-block"><div class="command-heading"><span>安装并启动</span><button type="button" class="copy-button" data-copy="docker-command" hidden>复制</button></div><pre id="docker-command" tabindex="0"><code>sudo git clone --depth 1 --branch v0.1.1 https://github.com/lhy8888/testspeed.git /opt/testspeed-src
+sudo docker compose --project-directory /opt/testspeed-src --file /opt/testspeed-src/compose.yaml up --build --detach
+sudo docker compose --project-directory /opt/testspeed-src --file /opt/testspeed-src/compose.yaml logs --follow</code></pre><p class="copy-feedback" role="status" aria-live="polite"></p></div>
+            <p class="small-note">源码目录为 <code>/opt/testspeed-src</code>；已存在该目录时参照完整文档处理。默认网页端口为 8080。</p>
+          </div></details>
+          <details class="foldout"><summary>Docker 通过 Snap 安装</summary><div class="foldout-body">
+            <p>如果 <code>sudo sh -c 'command -v docker'</code> 输出 <code>/snap/bin/docker</code>，源码应放在 Snap 可读取的目录，并同时指定 Snap 配置。</p>
+            <div class="command-block"><div class="command-heading"><span>全新 Snap 部署</span><button type="button" class="copy-button" data-copy="snap-command" hidden>复制</button></div><pre id="snap-command" tabindex="0"><code>sudo git clone --depth 1 --branch v0.1.1 https://github.com/lhy8888/testspeed.git /var/snap/docker/common/testspeed-src
+sudo docker compose --project-directory /var/snap/docker/common/testspeed-src --file /var/snap/docker/common/testspeed-src/compose.yaml --file /var/snap/docker/common/testspeed-src/compose.snap.yaml config --quiet
+sudo docker compose --project-directory /var/snap/docker/common/testspeed-src --file /var/snap/docker/common/testspeed-src/compose.yaml --file /var/snap/docker/common/testspeed-src/compose.snap.yaml up --build --detach</code></pre><p class="copy-feedback" role="status" aria-live="polite"></p></div>
+            <p class="small-note">已经克隆到 <code>/opt</code> 的用户可保留原目录，按<a href="https://github.com/lhy8888/testspeed/blob/v0.1.1/docs/deployment.md">完整部署文档</a>创建副本。使用 Snap 配置无需重装 Docker。</p>
+          </div></details>
+        </section>
+
+        <section id="help" aria-labelledby="help-title">
+          <h2 id="help-title">文档与下载</h2>
+          <div class="resource-links"><a href="https://github.com/lhy8888/testspeed/blob/v0.1.1/docs/deployment.md">完整部署文档 <span aria-hidden="true">↗</span></a><a href="https://github.com/lhy8888/testspeed/releases/latest">安装包与校验清单 <span aria-hidden="true">↗</span></a><a href="https://github.com/lhy8888/testspeed">GitHub 仓库 <span aria-hidden="true">↗</span></a></div>
+          <p class="small-note">企业内网无法访问 GitHub 时，可在联网机器下载对应安装包和 SHA256SUMS，再带入服务器；离线步骤见完整部署文档。</p>
+        </section>
+        <footer class="page-footer"><span>TESTSPEED · 部署与维护</span><a href="/">返回测速</a></footer>
+      </main>
+    </div>
+  </body>
+</html>

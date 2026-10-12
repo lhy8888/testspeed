@@ -3,156 +3,100 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#f7f8f5">
-    <meta name="description" content="简洁、直观的网络测速。测量下载、上传和延迟，了解设备到测速节点的连接表现。">
-    <title>轻测速 · 了解你的网络</title>
+    <meta name="theme-color" content="#ffffff">
+    <meta name="description" content="Measure your download speed, upload speed and latency with TESTSPEED.">
+    <title>TESTSPEED · 网络测速</title>
     <link rel="icon" href="/favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="/styles.css">
     <script src="/app.js" type="module"></script>
   </head>
   <body>
     <svg class="icon-definitions" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
-      <symbol id="icon-arrow-down" viewBox="0 0 24 24"><path d="M12 4v16m-6-6 6 6 6-6" /></symbol>
-      <symbol id="icon-arrow-up" viewBox="0 0 24 24"><path d="M12 20V4m-6 6 6-6 6 6" /></symbol>
-      <symbol id="icon-activity" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4" /></symbol>
       <symbol id="icon-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5m11 0a8 8 0 0 0-13.5-6M4 12a8 8 0 0 0 13.5 6" /></symbol>
-      <symbol id="icon-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6" /></symbol>
-      <symbol id="icon-sliders" viewBox="0 0 24 24"><path d="M4 7h6m4 0h6M4 17h10m4 0h2"/><circle cx="12" cy="7" r="2"/><circle cx="16" cy="17" r="2"/></symbol>
       <symbol id="icon-chevron" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5" /></symbol>
     </svg>
-    <div class="page-shell">
-      <header class="site-header">
-        <a class="brand" href="/" aria-label="轻测速首页">
-          <span class="brand-symbol" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-          <span>轻测速<span class="brand-english">SPEEDTEST</span></span>
+    <header class="language-bar">
+      <label class="visually-hidden" for="language-select" data-i18n="language">语言</label>
+      <select id="language-select" aria-label="Language"><option value="zh">中文</option><option value="en">English</option></select>
+    </header>
+    <main class="page-shell">
+      <section class="hero" aria-labelledby="page-title">
+        <a class="brand" href="/" aria-label="TESTSPEED">
+          <svg class="brand-gauge" viewBox="0 0 64 48" aria-hidden="true"><path d="M8 38a24 24 0 1 1 48 0M10 30l7-2m4-19 4 6m18-6-4 6m15 15-7-2"/><path class="gauge-needle" d="m32 31 12-12"/><circle cx="32" cy="31" r="3"/></svg>
+          <span>TESTSPEED</span>
         </a>
-        <span class="node-badge"><span id="connection-dot" class="connection-dot"></span><span id="node-name">连接测速节点</span></span>
-      </header>
-
-      <main>
-        <section class="intro" aria-labelledby="page-title">
-          <p class="eyebrow">YOUR CONNECTION, AT A GLANCE</p>
-          <h1 id="page-title">你的网络，有多快？</h1>
-          <p class="intro-description">一次测速，了解下载、上传与延迟。</p>
-        </section>
-
-        <section class="test-card" aria-label="网络测速">
-          <div class="test-card-heading">
-            <span class="measurement-label"><svg class="icon" aria-hidden="true"><use href="#icon-arrow-down" /></svg>下载速度</span>
-            <span id="phase-badge" class="phase-badge"><span class="phase-indicator"></span><span id="phase-label">准备连接</span></span>
-          </div>
-          <div class="hero-measurement">
-            <span id="download-value" class="hero-value">—</span>
-            <div class="hero-unit"><span id="download-unit">Mbps</span><small id="download-unit-description">兆比特 / 秒</small></div>
-          </div>
-          <div class="test-controls">
-            <button id="start-button" class="primary-button" type="button" disabled>
-              <span id="start-icon" class="play-icon" aria-hidden="true"></span><span id="start-label">开始测速</span>
-            </button>
-            <button id="stop-button" class="stop-button" type="button" hidden><span class="stop-icon" aria-hidden="true"></span>停止测速</button>
-            <p id="status-message" class="status-message" role="status" aria-live="polite">正在连接测速服务…</p>
-          </div>
-          <p id="error-message" class="error-message" role="alert" hidden></p>
-
-          <div id="test-progress" class="test-progress" role="progressbar" aria-label="测速进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="progress-fill"></span></div>
-          <div class="stage-list" aria-label="测速步骤">
-            <span data-stage="latency"><span class="stage-dot"></span>连接</span>
-            <span data-stage="download"><span class="stage-dot"></span>下载</span>
-            <span data-stage="upload"><span class="stage-dot"></span>上传</span>
-            <span data-stage="complete"><span class="stage-dot"></span>完成</span>
-          </div>
-
-          <div class="summary-grid">
-            <div class="summary-item">
-              <div class="summary-label"><svg class="icon" aria-hidden="true"><use href="#icon-arrow-up" /></svg>上传速度</div>
-              <div class="summary-measurement"><span id="upload-value">—</span><span id="upload-unit" class="summary-unit">Mbps</span></div>
-              <p>发送数据的速度</p>
-            </div>
-            <div class="summary-item">
-              <div class="summary-label"><svg class="icon" aria-hidden="true"><use href="#icon-activity" /></svg>空闲延迟</div>
-              <div class="summary-measurement"><span id="idle-latency-value">—</span><span class="summary-unit">ms</span></div>
-              <p>未测速时的响应时间</p>
-            </div>
-            <div class="summary-item">
-              <div class="summary-label"><span class="jitter-icon" aria-hidden="true">≈</span>延迟抖动</div>
-              <div class="summary-measurement"><span id="jitter-value">—</span><span class="summary-unit">ms</span></div>
-              <p>相邻响应时间的变化</p>
+        <h1 id="page-title" data-i18n="pageTitle">你的网速是</h1>
+        <div class="hero-measurement">
+          <span id="download-value" class="hero-value">—</span>
+          <div class="unit-controls">
+            <span id="download-unit" class="hero-unit">Mbps</span>
+            <small id="download-unit-description" class="visually-hidden" data-i18n="unitMbpsDescription">兆比特 / 秒</small>
+            <div class="test-controls">
+              <button id="start-button" class="round-button" type="button" aria-label="开始测速" disabled><span id="start-icon" class="play-icon" aria-hidden="true"></span><span id="start-label" class="visually-hidden" data-i18n="start">开始测速</span></button>
+              <button id="stop-button" class="round-button" type="button" aria-label="停止测速" hidden><span class="stop-icon" aria-hidden="true"></span><span class="visually-hidden" data-i18n="stop">停止测速</span></button>
             </div>
           </div>
+        </div>
+        <span id="phase-badge" class="phase-badge visually-hidden"><span id="phase-label" data-phase="idle">准备连接</span></span>
+        <p id="status-message" class="status-message" role="status" aria-live="polite" data-i18n="connecting">正在连接测速服务…</p>
+        <p id="error-message" class="error-message" role="alert" hidden></p>
+        <button id="more-info-button" class="more-info-button" type="button" aria-controls="more-details" aria-expanded="false" data-i18n="moreInfo">更多信息</button>
+        <div id="test-progress" class="visually-hidden" role="progressbar" aria-label="Test progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="progress-fill"></span></div>
+        <div class="stage-list visually-hidden" aria-hidden="true"><span data-stage="latency">连接</span><span data-stage="download">下载</span><span data-stage="upload">上传</span><span data-stage="complete">完成</span></div>
+      </section>
 
-          <details id="test-settings" class="settings-panel">
-            <summary><span class="settings-title"><svg class="icon" aria-hidden="true"><use href="#icon-sliders" /></svg>测速设置</span><span class="settings-summary"><span id="settings-summary">自动适配 · 10 秒 / 阶段</span><svg class="icon settings-chevron" aria-hidden="true"><use href="#icon-chevron" /></svg></span></summary>
-            <fieldset id="settings-fields" class="settings-fields">
-              <legend class="visually-hidden">测速设置</legend>
-              <div class="settings-row mode-setting">
-                <div class="setting-label"><span>并发方式</span><p>自动模式根据 RTT 和实际吞吐调整测速流。</p></div>
-                <div class="mode-control" role="group" aria-label="并发方式">
-                  <label><input id="mode-auto" name="stream-mode" type="radio" value="auto" checked><span>自动适配 <small>推荐</small></span></label>
-                  <label><input id="mode-manual" name="stream-mode" type="radio" value="manual"><span>手动指定</span></label>
-                </div>
-              </div>
-              <div class="settings-row">
-                <div class="setting-label"><label for="stream-count">并发测速流</label><p id="stream-limit">正在读取当前部署能力…</p></div>
-                <div class="number-control"><input id="stream-count" type="number" min="1" max="24" step="1" value="4" inputmode="numeric" aria-describedby="stream-limit stream-explanation" disabled><span>条</span></div>
-              </div>
-              <div class="settings-row">
-                <div class="setting-label"><label for="measurement-duration">测量时间</label><p>每个方向单独计时，预热不计入结果。</p></div>
-                <select id="measurement-duration" aria-label="每个方向的测量时间">
-                  <option id="default-duration" value="">节点默认 · 10 秒</option>
-                  <option value="10000">10 秒 / 阶段</option>
-                  <option value="20000">20 秒 / 阶段</option>
-                  <option value="30000">30 秒 / 阶段</option>
-                </select>
-              </div>
-            </fieldset>
-            <p id="stream-explanation" class="settings-caption">测速流与 TCP 连接不一一对应；HTTP/2 可在一条 TCP 上复用多个流。更多并发适合高带宽、高 RTT 链路，也会消耗更多资源。</p>
-          </details>
-        </section>
+      <section id="more-details" class="more-details" aria-label="测速详情" data-i18n-aria-label="moreInfo" hidden>
+        <div class="summary-grid">
+          <div class="summary-item"><span data-i18n="uploadLabel">上传速度</span><div class="summary-measurement"><strong id="upload-value">—</strong><small id="upload-unit">Mbps</small></div></div>
+          <div class="summary-item"><span data-i18n="idleLatency">空闲延迟</span><div class="summary-measurement"><strong id="idle-latency-value">—</strong><small>ms</small></div></div>
+          <div class="summary-item"><span data-i18n="jitter">延迟抖动</span><div class="summary-measurement"><strong id="jitter-value">—</strong><small>ms</small></div></div>
+        </div>
+        <div class="node-line"><span id="connection-dot" class="connection-dot"></span><span id="node-name">连接测速节点</span></div>
+        <p id="transport-message" class="transport-message" role="status" hidden></p>
 
-        <section class="details-card" aria-labelledby="details-title">
-          <div class="details-heading">
-            <h2 id="details-title">连接表现</h2>
-            <div class="chart-legend"><span><i class="download-key"></i>下载</span><span><i class="upload-key"></i>上传</span></div>
-          </div>
-          <div class="chart-container">
-            <svg id="speed-chart" viewBox="0 0 960 164" role="img" aria-labelledby="chart-title chart-description" preserveAspectRatio="none">
-              <title id="chart-title">测速期间的下载与上传速度变化</title>
-              <desc id="chart-description">测速开始后显示实际测量的速度曲线，横轴是每个阶段经过的时间，纵轴按速度自动使用 Mbps 或 Gbps。</desc>
-              <g class="chart-grid"><path d="M0 16H960M0 60H960M0 104H960M0 148H960" /></g>
-              <path id="download-area" class="download-area" d="" />
-              <path id="upload-area" class="upload-area" d="" />
-              <path id="download-line" class="download-line" d="" />
-              <path id="upload-line" class="upload-line" d="" />
-            </svg>
-            <div id="chart-empty" class="chart-empty">测速开始后，速度变化会显示在这里</div>
-            <span id="chart-max" class="chart-max" hidden></span>
-          </div>
-          <div class="chart-axis"><span>0 秒</span><span id="chart-duration">10 秒 / 阶段</span></div>
-          <div class="detail-metrics">
-            <div><span>下载负载延迟</span><strong><span id="download-loaded-value">—</span> <small>ms</small></strong></div>
-            <div><span>上传负载延迟</span><strong><span id="upload-loaded-value">—</span> <small>ms</small></strong></div>
-            <div><span>请求失败率</span><strong><span id="failure-rate-value">—</span> <small>%</small></strong></div>
-            <div><span>流量估算</span><strong id="traffic-value">—</strong></div>
-          </div>
-          <p class="metrics-caption">延迟为 HTTP 往返时间；负载延迟反映传输数据时的响应表现。请求失败率不代表网络丢包率。</p>
-          <div class="diagnostics-heading"><h3>传输诊断</h3><span id="concurrency-mode-label">自动并发</span></div>
-          <div class="diagnostic-metrics">
-            <div><span>测速流 <small>当前 / 峰值</small></span><strong id="streams-value">— / —</strong></div>
-            <div><span>服务端观测 TCP <small id="tcp-caption">当前 / 峰值</small></span><strong id="tcp-value">— / —</strong></div>
-            <div><span>传输协议</span><strong id="protocol-value">—</strong></div>
-            <div><span>空闲 RTT</span><strong><span id="rtt-value">—</span> <small>ms</small></strong></div>
-            <div><span>自动预热</span><strong id="warmup-value">随 RTT 调整</strong></div>
-            <div><span>带宽时延积 <small>估算</small></span><strong id="bdp-value">—</strong></div>
-          </div>
-          <p id="transport-caption" class="metrics-caption">TCP 数是测速服务看到的连接；经过反向代理时，仅反映代理到服务端的连接。带宽时延积是吞吐 × RTT 的在途数据估算。</p>
-          <p id="bottleneck-message" class="bottleneck-message" role="status" hidden></p>
-        </section>
+        <div class="details-heading"><h2 data-i18n="connectionPerformance">连接表现</h2><div class="chart-legend"><span><i class="download-key"></i><span data-i18n="downloadLabel">下载</span></span><span><i class="upload-key"></i><span data-i18n="uploadLabel">上传</span></span></div></div>
+        <div class="chart-container">
+          <svg id="speed-chart" viewBox="0 0 960 164" role="img" aria-labelledby="chart-title chart-description" preserveAspectRatio="none">
+            <title id="chart-title" data-i18n="chartTitle">实际测速曲线</title><desc id="chart-description" data-i18n="chartDescription">每个阶段实际测量的速度变化。</desc>
+            <g class="chart-grid"><path d="M0 16H960M0 60H960M0 104H960M0 148H960" /></g>
+            <path id="download-area" class="download-area" d=""/><path id="upload-area" class="upload-area" d=""/><path id="download-line" class="download-line" d=""/><path id="upload-line" class="upload-line" d=""/>
+          </svg>
+          <div id="chart-empty" class="chart-empty" data-i18n="chartEmpty">测速开始后显示速度变化</div><span id="chart-max" class="chart-max" hidden></span>
+        </div>
+        <div class="chart-axis"><span>0 s</span><span id="chart-duration">10 秒 / 阶段</span></div>
+        <div class="detail-metrics">
+          <div><span data-i18n="downloadLoaded">下载负载延迟</span><strong><span id="download-loaded-value">—</span> <small>ms</small></strong></div>
+          <div><span data-i18n="uploadLoaded">上传负载延迟</span><strong><span id="upload-loaded-value">—</span> <small>ms</small></strong></div>
+          <div><span data-i18n="failureRate">请求失败率</span><strong><span id="failure-rate-value">—</span> <small>%</small></strong></div>
+          <div><span data-i18n="traffic">流量估算</span><strong id="traffic-value">—</strong></div>
+        </div>
+        <p class="metrics-caption" data-i18n="latencyCaption">延迟为 HTTP 往返时间；请求失败率不代表网络丢包率。</p>
+        <div class="diagnostics-heading"><h2 data-i18n="transportDiagnostics">传输诊断</h2><span id="concurrency-mode-label">手动 · 8 路</span></div>
+        <div class="diagnostic-metrics">
+          <div><span><span id="stream-metric-label">测速连接</span> <small data-i18n="currentPeak">当前 / 峰值</small></span><strong id="streams-value">— / —</strong></div>
+          <div><span><span data-i18n="tcpObserved">服务端观测 TCP</span> <small id="tcp-caption" data-i18n="currentPeak">当前 / 峰值</small></span><strong id="tcp-value">— / —</strong></div>
+          <div><span data-i18n="protocol">传输协议</span><strong id="protocol-value">—</strong></div>
+          <div><span data-i18n="rtt">空闲 RTT</span><strong><span id="rtt-value">—</span> <small>ms</small></strong></div>
+          <div><span data-i18n="warmup">自动预热</span><strong id="warmup-value">随 RTT 调整</strong></div>
+          <div><span><span data-i18n="bdp">带宽时延积</span> <small data-i18n="estimated">估算</small></span><strong id="bdp-value">—</strong></div>
+        </div>
+        <p id="transport-caption" class="metrics-caption" data-i18n="transportCaption">TCP 数是测速服务看到的连接；经过代理时仅反映代理到服务端的连接。带宽时延积是吞吐 × RTT 的在途数据估算。</p>
+        <p id="bottleneck-message" class="bottleneck-message" role="status" hidden></p>
 
-        <div class="test-note"><span class="note-mark" aria-hidden="true">i</span><p>面向 1G / 10G / 100G 链路自动调整；可测上限取决于浏览器、CPU、网卡与测速服务。高速测速会使用大量流量。</p></div>
+        <details id="test-settings" class="settings-panel">
+          <summary><span data-i18n="testSettings">测速设置</span><span class="settings-summary"><span id="settings-summary">8 路并发 · 10 秒 / 阶段</span><svg class="icon settings-chevron" aria-hidden="true"><use href="#icon-chevron"/></svg></span></summary>
+          <fieldset id="settings-fields" class="settings-fields"><legend class="visually-hidden" data-i18n="testSettings">测速设置</legend>
+            <div class="settings-row mode-setting"><div class="setting-label"><span data-i18n="concurrencyMode">并发方式</span><p data-i18n="concurrencyHelp">默认 8 路，可按 RTT 和吞吐自动调整。</p></div><div class="mode-control" role="group" aria-label="并发方式" data-i18n-aria-label="concurrencyMode"><label><input id="mode-manual" name="stream-mode" type="radio" value="manual" checked><span><span data-i18n="manual">手动指定</span><small data-i18n="defaultTag">默认</small></span></label><label><input id="mode-auto" name="stream-mode" type="radio" value="auto"><span data-i18n="automatic">自动适配</span></label></div></div>
+            <div class="settings-row"><div class="setting-label"><label id="stream-count-label" for="stream-count">并发连接数</label><p id="stream-limit">单端口支持最多 30 路</p></div><input id="stream-count" type="number" min="1" max="30" step="1" value="8" inputmode="numeric" aria-describedby="stream-limit stream-explanation"></div>
+            <div class="settings-row"><div class="setting-label"><label for="measurement-duration" data-i18n="measurementTime">测量时间</label><p data-i18n="measurementHelp">每个方向单独计时，预热不计入结果。</p></div><select id="measurement-duration"><option id="default-duration" value="">节点默认 · 10 秒</option><option value="10000" data-i18n="durationOption" data-i18n-vars='{"seconds":10}'>10 秒 / 阶段</option><option value="20000" data-i18n="durationOption" data-i18n-vars='{"seconds":20}'>20 秒 / 阶段</option><option value="30000" data-i18n="durationOption" data-i18n-vars='{"seconds":30}'>30 秒 / 阶段</option></select></div>
+          </fieldset>
+          <p id="stream-explanation" class="settings-caption">每路 WebSocket 使用独立连接。</p>
+        </details>
+        <p class="test-note" data-i18n="privacyNote">高速测速会使用大量流量。可测上限取决于浏览器、CPU、网卡与测速服务。</p>
         <p id="previous-result" class="previous-result" hidden></p>
-        <noscript><p class="error-message">请启用 JavaScript 后使用测速功能。</p></noscript>
-      </main>
-      <footer class="site-footer"><span>轻测速 · 简单看见网络表现</span><span>设备 ↔ 当前测速节点</span></footer>
-    </div>
+      </section>
+      <noscript><p class="error-message">请启用 JavaScript / Please enable JavaScript.</p></noscript>
+    </main>
+    <footer class="site-footer"><span data-i18n="footer">设备 ↔ 当前测速节点</span><a href="/deploy.html" data-i18n="deploymentGuide">部署教程</a><span>TESTSPEED</span></footer>
   </body>
 </html>

@@ -1,4 +1,5 @@
 import { loadConfig, SpeedTest } from "./speedtest.js";
+import { t, setLanguage, getLanguage, applyLanguageText, onLanguageChange, translateError } from "./i18n.js";
 
 const element = (id) => document.getElementById(id);
 const ui = {
@@ -15,15 +16,25 @@ const ui = {
   settingsFields: element("settings-fields"), settingsSummary: element("settings-summary"),
   autoMode: element("mode-auto"), manualMode: element("mode-manual"), streamCount: element("stream-count"), streamLimit: element("stream-limit"),
   duration: element("measurement-duration"), defaultDuration: element("default-duration"),
+  streamCountLabel: element("stream-count-label"), streamMetricLabel: element("stream-metric-label"), streamExplanation: element("stream-explanation"),
   streams: element("streams-value"), tcp: element("tcp-value"), tcpCaption: element("tcp-caption"), protocol: element("protocol-value"),
   rtt: element("rtt-value"), warmup: element("warmup-value"), bdp: element("bdp-value"),
   modeLabel: element("concurrency-mode-label"), bottleneck: element("bottleneck-message"),
+  transportMessage: element("transport-message"),
+  more: element("more-details"), moreButton: element("more-info-button"), language: element("language-select"),
 };
 let config = null;
 let connectionController = null;
 let running = false;
 let phase = "idle";
-let stopMessage = "测速已停止，可重新开始。";
+let stopMessageKey = "stopped";
+let statusState = { key: "connecting", params: {} };
+let lastError = null;
+let errorDuringTransfer = false;
+let previousResult = null;
+let hasRun = false;
+let downloadComplete = false;
+let lastDiagnostics = null;
 let downloadBytes = 0;
 let uploadBytes = 0;
 let progress = 0;
@@ -32,19 +43,22 @@ let chartDurationMs = 10000;
 let peakStreams = 0;
 let peakConnections = 0;
 let testOptions = null;
-let settings = { mode: "auto", streams: 4, durationMs: null };
-const settingsKey = "light-speed:settings";
+let transportState = null;
+let runtimeMaxStreams = null;
+let settings = { mode: "manual", streams: 8, durationMs: null };
+let hasSavedSettings = false;
+const settingsKey = "light-speed:settings:v3";
 
 try {
   const saved = JSON.parse(localStorage.getItem(settingsKey));
-  if (saved && (saved.mode === "auto" || saved.mode === "manual")) settings.mode = saved.mode;
-  if (Number.isInteger(saved?.streams) && saved.streams >= 1) settings.streams = Math.min(saved.streams, 128);
-  if ([10000, 20000, 30000].includes(saved?.durationMs)) settings.durationMs = saved.durationMs;
+  if (saved && (saved.mode === "auto" || saved.mode === "manual")) { settings.mode = saved.mode; hasSavedSettings = true; }
+  if (Number.isInteger(saved?.streams) && saved.streams >= 1) { settings.streams = Math.min(saved.streams, 30); hasSavedSettings = true; }
+  if ([10000, 20000, 30000].includes(saved?.durationMs)) { settings.durationMs = saved.durationMs; hasSavedSettings = true; }
 } catch { /* Settings are optional when local storage is unavailable. */ }
 
 const number = (value, decimals = 1) => {
   if (value === null || !Number.isFinite(value)) return "—";
-  if (value >= 1000) return Math.round(value).toLocaleString("zh-CN");
+  if (value >= 1000) return Math.round(value).toLocaleString(getLanguage() === "zh" ? "zh-CN" : "en");
   if (value >= 100) return value.toFixed(0);
   return value.toFixed(decimals);
 };
@@ -69,47 +83,122 @@ function setSpeed(kind, value) {
   (kind === "download" ? ui.downloadUnit : ui.uploadUnit).textContent = speedUnit(value);
   if (kind === "download") {
     ui.download.classList.toggle("compact", target.textContent.length > 5);
-    ui.downloadUnitDescription.textContent = speedUnit(value) === "Gbps" ? "千兆比特 / 秒" : "兆比特 / 秒";
+    ui.downloadUnitDescription.textContent = t(speedUnit(value) === "Gbps" ? "unitGbpsDescription" : "unitMbpsDescription");
   }
 }
 
 const setDownload = (value) => setSpeed("download", value);
 
+function configuredMaxStreams() {
+  return Math.max(1, Math.min(30, config?.performance?.maxStreams || config?.test?.maxStreams || 30));
+}
+
 function maxStreams() {
-  return Math.max(1, Math.min(128, config?.performance?.maxStreams || config?.test?.maxStreams || 24));
+  return Math.min(configuredMaxStreams(), runtimeMaxStreams || configuredMaxStreams());
 }
 
 function currentDuration() {
   return settings.durationMs || Math.max(config?.test?.downloadDurationMs || 10000, config?.test?.uploadDurationMs || 10000);
 }
 
+function usesWebSocket() {
+  return (transportState?.transport || config?.performance?.transport || (config ? "http" : "websocket")) === "websocket";
+}
+
 function syncSettings() {
-  settings.streams = Math.min(maxStreams(), Math.max(1, Math.round(settings.streams)));
+  settings.streams = Math.min(30, Math.max(1, Math.round(settings.streams)));
+  const effectiveStreams = Math.min(maxStreams(), settings.streams);
   ui.autoMode.checked = settings.mode === "auto";
   ui.manualMode.checked = settings.mode === "manual";
-  ui.streamCount.value = String(settings.streams);
+  ui.streamCount.value = String(effectiveStreams);
   ui.streamCount.max = String(maxStreams());
   ui.streamCount.disabled = running || settings.mode === "auto";
   ui.settingsFields.disabled = running;
   ui.duration.value = settings.durationMs ? String(settings.durationMs) : "";
   const duration = durationLabel(currentDuration());
-  ui.defaultDuration.textContent = `节点默认 · ${durationLabel(Math.max(config?.test?.downloadDurationMs || 10000, config?.test?.uploadDurationMs || 10000))} 秒`;
-  ui.settingsSummary.textContent = `${settings.mode === "auto" ? "自动适配" : `${settings.streams} 条测速流`} · ${duration} 秒 / 阶段`;
-  if (config) ui.streamLimit.textContent = `当前部署支持 ${maxStreams()} 条测速流`;
+  ui.defaultDuration.textContent = t("defaultDuration", { seconds: durationLabel(Math.max(config?.test?.downloadDurationMs || 10000, config?.test?.uploadDurationMs || 10000)) });
+  ui.settingsSummary.textContent = t("settingsSummary", { mode: settings.mode === "auto" ? t("automatic") : t("concurrencyCount", { count: effectiveStreams }), seconds: duration });
+  if (config) ui.streamLimit.textContent = usesWebSocket()
+    ? t("streamLimitWs", { count: maxStreams() })
+    : t("streamLimitHttp", { count: maxStreams() });
+  ui.streamCountLabel.textContent = t(usesWebSocket() ? "concurrencyConnections" : "concurrencyFlows");
+  ui.streamMetricLabel.textContent = t(usesWebSocket() ? "streamConnections" : "streamFlows");
+  ui.streamExplanation.textContent = t(usesWebSocket() ? "streamExplanationWs" : "streamExplanationHttp");
   if (!curves.download.length && !curves.upload.length) {
-    ui.modeLabel.textContent = settings.mode === "auto" ? "自动并发" : `手动 · ${settings.streams} 条流`;
+    ui.modeLabel.textContent = settings.mode === "auto" ? t("automatic") : t("manualModeLabel", { count: effectiveStreams });
     chartDurationMs = currentDuration();
     drawChart();
   }
+  if (!running && !curves.download.length && !curves.upload.length && transportState) renderTransportMessage();
 }
 
-function updateSettings() {
+function updateSettings(event) {
   settings.mode = ui.manualMode.checked ? "manual" : "auto";
   const count = Number(ui.streamCount.value);
-  if (Number.isFinite(count) && count >= 1) settings.streams = Math.round(count);
+  const shownCount = Math.min(settings.streams, maxStreams());
+  if (Number.isFinite(count) && count >= 1 && (event?.target === ui.streamCount || count !== shownCount)) {
+    settings.streams = Math.min(maxStreams(), Math.round(count));
+  }
   settings.durationMs = ["10000", "20000", "30000"].includes(ui.duration.value) ? Number(ui.duration.value) : null;
   syncSettings();
+  hasSavedSettings = true;
   try { localStorage.setItem(settingsKey, JSON.stringify(settings)); } catch { /* Optional local preference storage. */ }
+}
+
+function renderTransportMessage() {
+  const update = transportState;
+  if (!update) return;
+  const unavailable = Array.isArray(update.unreachableOrigins) && update.unreachableOrigins.length > 0;
+  const single = update.mode === "single-origin";
+  const websocketFallback = update.reason === "websocket-unavailable";
+  const currentMode = running || phase === "complete" ? testOptions?.mode || settings.mode : settings.mode;
+  const effective = (running || phase === "complete") && Number.isFinite(update.effectiveStreams) ? update.effectiveStreams : Math.min(settings.streams, maxStreams());
+  let message = "";
+  if (usesWebSocket()) message = t("wsTransport", { mode: currentMode === "auto" ? t("automatic") : t("concurrencyCount", { count: effective }) });
+  else if (websocketFallback) message = t("wsFallback", { count: maxStreams() });
+  else if (update.fallback) message = t("httpFallback", { count: maxStreams() });
+  else if (unavailable) message = t("partialOrigins", { count: maxStreams() });
+  else if (single) message = t("singleHttpTransport", { count: maxStreams() });
+  if (update.streamsAdjusted && testOptions?.mode === "manual") {
+    message += ` ${t("streamsAdjusted", { from: update.requestedStreams, to: update.effectiveStreams })}`;
+  }
+  if (websocketFallback) message += ` ${t("wsFallbackHint")}`;
+  else if (unavailable || update.fallback) message += ` ${t("httpFallbackHint")}`;
+  ui.transportMessage.textContent = message;
+  ui.transportMessage.hidden = !message;
+  ui.transportMessage.classList.toggle("is-fallback", Boolean(unavailable || update.fallback));
+}
+
+function updateTransport(update) {
+  if (!Number.isFinite(update.maxStreams) || update.maxStreams < 1) return;
+  runtimeMaxStreams = Math.min(configuredMaxStreams(), Math.round(update.maxStreams));
+  transportState = { ...update, maxStreams: runtimeMaxStreams };
+  for (const key of ["transport", "mode", "reason", "fallback", "maxStreams", "requestedStreams", "effectiveStreams"]) {
+    if (update[key] !== undefined) ui.transportMessage.dataset[key] = String(update[key]);
+    else delete ui.transportMessage.dataset[key];
+  }
+  syncSettings();
+  renderTransportMessage();
+  if (usesWebSocket() && update.reason !== "single-origin-config" && !ui.protocol.textContent.startsWith("WebSocket")) ui.protocol.textContent = "WebSocket";
+  else if (!usesWebSocket() && ui.protocol.textContent.startsWith("WebSocket")) ui.protocol.textContent = "—";
+  if (testOptions?.mode === "manual" && Number.isFinite(update.effectiveStreams)) {
+    ui.modeLabel.textContent = t("manualModeLabel", { count: update.effectiveStreams });
+  }
+}
+
+function showConfiguredTransport() {
+  const origins = config?.performance?.measurementOrigins;
+  if (Array.isArray(origins) && origins.length === 1) {
+    updateTransport({ transport: config.performance.transport, mode: "single-origin", reason: "single-origin-config", fallback: false, origins, maxStreams: configuredMaxStreams() });
+  }
+}
+
+function finishInterruptedDiagnostics() {
+  ui.streams.textContent = `0 / ${peakStreams ? number(peakStreams, 0) : "—"}`;
+  ui.streams.dataset.active = "0";
+  delete ui.tcp.dataset.active;
+  ui.tcp.textContent = `— / ${peakConnections ? number(peakConnections, 0) : "—"}`;
+  ui.tcpCaption.textContent = t("currentUnknownPeak");
 }
 
 function protocolLabel(protocols) {
@@ -119,6 +208,7 @@ function protocolLabel(protocols) {
 }
 
 function updateDiagnostics(update) {
+  lastDiagnostics = { ...lastDiagnostics, ...update };
   const active = Number.isFinite(update.activeStreams) ? update.activeStreams : update.streams;
   if (Number.isFinite(active)) {
     peakStreams = Math.max(peakStreams, update.peakStreams || active);
@@ -134,7 +224,7 @@ function updateDiagnostics(update) {
     if (Number.isFinite(current)) {
       peakConnections = Math.max(peakConnections, connections.peak || 0, hasActiveCount ? current : 0);
       ui.tcp.textContent = hasActiveCount || peakConnections ? `${number(current, 0)} / ${number(peakConnections, 0)}` : number(current, 0);
-      ui.tcpCaption.textContent = hasActiveCount ? "当前 / 峰值" : peakConnections ? "已观测 / 峰值" : "累计观测";
+      ui.tcpCaption.textContent = t(hasActiveCount ? "currentPeak" : peakConnections ? "observedPeak" : "observedTotal");
       if (Number.isFinite(connections.observed)) ui.tcp.dataset.observed = String(connections.observed);
       if (hasActiveCount) ui.tcp.dataset.active = String(connections.active);
       else delete ui.tcp.dataset.active;
@@ -142,18 +232,17 @@ function updateDiagnostics(update) {
       ui.tcp.dataset.scope = connections.scope || "server";
     }
     const protocol = protocolLabel(connections.protocols);
-    if (protocol !== "—") ui.protocol.textContent = protocol;
+    if (protocol !== "—") ui.protocol.textContent = usesWebSocket() ? `WebSocket · ${protocol}` : protocol;
   }
   if (Number.isFinite(update.rttMs)) ui.rtt.textContent = number(update.rttMs);
-  if (Number.isFinite(update.warmupMs)) ui.warmup.textContent = `${durationLabel(update.warmupMs)} 秒`;
+  if (Number.isFinite(update.warmupMs)) ui.warmup.textContent = t("secondsUnit", { seconds: durationLabel(update.warmupMs) });
   if (Number.isFinite(update.bdpBytes)) {
     ui.bdp.textContent = formatTraffic(update.bdpBytes);
     ui.bdp.dataset.bytes = String(update.bdpBytes);
   }
   if (typeof update.bottleneck === "string" && update.bottleneck) {
     const message = {
-      "client-scheduling": "浏览器计时出现持续延迟，结果可能受客户端调度影响。",
-      "control-shared-origin": "测速流与延迟探测共用连接，负载延迟可能包含浏览器排队时间。",
+      "client-scheduling": t("clientScheduling"),
     }[update.bottleneck];
     if (message) {
       ui.bottleneck.textContent = message;
@@ -170,6 +259,8 @@ function setProgress(value) {
 
 function setStage(next) {
   phase = next;
+  ui.phase.dataset.phase = next;
+  ui.download.classList.toggle("measuring", next === "download" && !downloadComplete);
   const stages = ["latency", "download", "upload", "complete"];
   const index = stages.indexOf(next);
   for (const item of document.querySelectorAll("[data-stage]")) {
@@ -179,20 +270,33 @@ function setStage(next) {
   }
   ui.badge.classList.toggle("running", running && next !== "complete");
   ui.badge.classList.toggle("complete", next === "complete");
-  ui.phase.textContent = { idle: "准备就绪", latency: "正在连接", download: "正在测量下载", upload: "正在测量上传", complete: "测速完成", stopped: "测速已停止", error: "连接遇到问题" }[next];
+  ui.phase.textContent = t(`phase${next[0].toUpperCase()}${next.slice(1)}`);
+}
+
+function setStatus(key, params = {}) {
+  statusState = { key, params };
+  ui.status.textContent = t(key, params);
 }
 
 function clearError() {
   ui.error.hidden = true;
   ui.error.textContent = "";
+  lastError = null;
 }
 
-function showError(error) {
-  ui.error.textContent = error instanceof TypeError ? "无法连接测速服务，请检查网络后重试。" : error.message || "测速暂时不可用，请稍后重试。";
+function showError(error, transferFailed = phase === "download" || phase === "upload") {
+  lastError = error;
+  errorDuringTransfer = transferFailed;
+  const hint = usesWebSocket()
+    ? t("wsHint")
+    : t("httpHint");
+  ui.error.textContent = error instanceof TypeError
+    ? transferFailed ? `${t("transferError")} ${hint}` : t("configError")
+    : translateError(error);
   ui.error.hidden = false;
   ui.dot.className = "connection-dot disconnected";
   setStage("error");
-  ui.status.textContent = "请检查连接后再试一次。";
+  setStatus(transferFailed ? usesWebSocket() ? "wsHint" : "httpHint" : "serviceHint");
 }
 
 function setRunning(value) {
@@ -206,13 +310,15 @@ function setRunning(value) {
 function resetMetrics() {
   [ui.download, ui.upload, ui.idle, ui.jitter, ui.downloadLoaded, ui.uploadLoaded, ui.failure, ui.traffic].forEach((item) => { item.textContent = "—"; });
   ui.download.classList.remove("compact");
+  downloadComplete = false;
+  lastDiagnostics = null;
   setSpeed("download", null);
   setSpeed("upload", null);
   [ui.streams, ui.tcp].forEach((item) => { item.textContent = "— / —"; });
   [ui.protocol, ui.rtt, ui.bdp].forEach((item) => { item.textContent = "—"; });
   for (const item of [ui.streams, ui.tcp, ui.bdp]) for (const key of Object.keys(item.dataset)) delete item.dataset[key];
-  ui.warmup.textContent = "随 RTT 调整";
-  ui.tcpCaption.textContent = "当前 / 峰值";
+  ui.warmup.textContent = t("warmupPending");
+  ui.tcpCaption.textContent = t("currentPeak");
   ui.bottleneck.hidden = true;
   ui.bottleneck.textContent = "";
   peakStreams = 0;
@@ -239,15 +345,17 @@ function drawChart() {
   element("chart-empty").hidden = samples.length > 0;
   element("chart-max").hidden = !samples.length;
   element("chart-max").textContent = formatSpeed(max);
-  element("chart-duration").textContent = `${number(duration / 1000, 0)} 秒 / 阶段`;
+  element("chart-duration").textContent = t("chartDuration", { seconds: number(duration / 1000, 0) });
 }
 
 function onUpdate(update) {
-  if (update.type === "phase") {
+  if (update.type === "transport") {
+    updateTransport(update);
+  } else if (update.type === "phase") {
     setStage(update.phase);
     if (Number.isFinite(update.durationMs)) chartDurationMs = update.durationMs;
     updateDiagnostics(update);
-    ui.status.textContent = update.phase === "latency" ? "正在检查连接并测量空闲延迟…" : "正在预热连接，准备测量…";
+    setStatus(update.phase === "latency" ? "statusLatency" : "statusWarmup");
   } else if (update.type === "latency") {
     if (update.phase === "idle") {
       ui.idle.textContent = number(update.stats.medianMs);
@@ -264,19 +372,20 @@ function onUpdate(update) {
       updateDiagnostics(update);
       setProgress((isDownload ? .05 : .52) + update.progress * .47);
       if (!update.warmingUp) {
-        if (isDownload) setDownload(update.mbps);
-        else setSpeed("upload", update.mbps);
+        if (isDownload && !downloadComplete) setDownload(update.mbps);
       }
       if (isDownload) downloadBytes = update.totalBytes;
       else uploadBytes = update.totalBytes;
       ui.traffic.textContent = formatTraffic(downloadBytes + uploadBytes);
-      ui.status.textContent = update.warmingUp ? "正在预热连接，准备测量…" : `正在测量${isDownload ? "下载" : "上传"}速度，还需约 ${Math.ceil(update.remainingMs / 1000)} 秒`;
+      setStatus(update.warmingUp ? "statusWarmup" : "statusTransfer", { direction: t(isDownload ? "downloadLabel" : "uploadLabel"), seconds: Math.ceil(update.remainingMs / 1000) });
       curves[update.phase] = update.points;
       drawChart();
     }
   } else if (update.type === "phase-complete") {
     updateDiagnostics(update.result);
     if (update.phase === "download") {
+      downloadComplete = true;
+      ui.download.classList.remove("measuring");
       setDownload(update.result.mbps);
       downloadBytes = update.result.totalBytes;
     } else {
@@ -291,13 +400,14 @@ function onUpdate(update) {
     setSpeed("upload", result.uploadMbps);
     updateDiagnostics(result.download);
     updateDiagnostics(result.upload);
+    if (result.transport) updateTransport(result.transport);
     ui.traffic.textContent = formatTraffic(result.download.totalBytes + result.upload.totalBytes);
     const latency = Object.values(result.latency);
     const failed = result.download.failedRequests + result.upload.failedRequests + latency.reduce((sum, item) => sum + item.failed, 0);
     const requests = result.download.requests + result.upload.requests + latency.reduce((sum, item) => sum + item.attempts, 0);
     ui.failure.textContent = number(requests ? failed / requests * 100 : 0);
     const noLoadedSamples = !result.latency.download.samples || !result.latency.upload.samples;
-    ui.status.textContent = failed || noLoadedSamples ? "测速完成；部分请求未成功，结果可能受当前网络状态影响。" : "测速完成，结果反映此刻到当前节点的连接表现。";
+    setStatus(failed || noLoadedSamples ? "statusPartial" : "statusComplete");
     ui.dot.className = "connection-dot connected";
     try {
       localStorage.setItem("light-speed:last-result", JSON.stringify({ completedAt: result.completedAt, downloadMbps: result.downloadMbps, uploadMbps: result.uploadMbps }));
@@ -315,9 +425,14 @@ async function connect() {
   } finally {
     if (connectionController === controller) connectionController = null;
   }
-  ui.node.textContent = config.nodes[0].name;
+  ui.node.textContent = config.nodes[0].name === "默认测速节点" ? t("defaultNode") : config.nodes[0].name;
   ui.dot.className = "connection-dot connected";
+  if (!hasSavedSettings) {
+    settings.mode = config.performance?.defaultMode === "auto" ? "auto" : "manual";
+    settings.streams = Math.max(1, Math.min(30, config.performance?.defaultStreams || 8));
+  }
   syncSettings();
+  showConfiguredTransport();
   drawChart();
 }
 
@@ -325,35 +440,43 @@ async function start() {
   if (running) return;
   clearError();
   updateSettings();
+  runtimeMaxStreams = null;
+  transportState = null;
+  ui.transportMessage.hidden = true;
+  ui.transportMessage.textContent = "";
+  for (const key of Object.keys(ui.transportMessage.dataset)) delete ui.transportMessage.dataset[key];
   resetMetrics();
   setRunning(true);
-  stopMessage = "测速已停止，可重新开始。";
+  showConfiguredTransport();
+  stopMessageKey = "stopped";
   try {
-    if (navigator.onLine === false) throw new Error("当前设备处于离线状态，请恢复网络连接后重试。");
+    if (navigator.onLine === false) throw new Error(t("offline"));
     if (!config) {
       setStage("latency");
-      ui.status.textContent = "正在连接测速服务…";
+      setStatus("connecting");
       await connect();
       // A user may stop while the configuration request is in flight.
       if (!running) return;
     }
-    testOptions = { mode: settings.mode, streams: settings.streams, ...(settings.durationMs ? { durationMs: settings.durationMs } : {}) };
+    testOptions = { mode: settings.mode, streams: Math.min(settings.streams, configuredMaxStreams()), ...(settings.durationMs ? { durationMs: settings.durationMs } : {}) };
     chartDurationMs = currentDuration();
-    ui.modeLabel.textContent = testOptions.mode === "auto" ? "自动并发" : `手动 · ${testOptions.streams} 条流`;
+    ui.modeLabel.textContent = testOptions.mode === "auto" ? t("automatic") : t("manualModeLabel", { count: testOptions.streams });
     await speedtest.run(config, testOptions);
   } catch (error) {
     if (error.name === "AbortError") {
       setStage("stopped");
-      ui.status.textContent = stopMessage;
+      setStatus(stopMessageKey);
     } else {
       showError(error);
     }
   } finally {
+    if (phase !== "complete") finishInterruptedDiagnostics();
     setRunning(false);
-    ui.startLabel.textContent = "再测一次";
+    hasRun = true;
+    ui.startLabel.textContent = t("retest");
     ui.startIcon.className = "";
     ui.startIcon.innerHTML = '<svg class="icon" aria-hidden="true"><use href="#icon-refresh"></use></svg>';
-    ui.start.setAttribute("aria-label", "再测一次");
+    ui.start.setAttribute("aria-label", t("retest"));
     if (phase !== "complete") ui.badge.classList.remove("running");
   }
 }
@@ -361,48 +484,86 @@ async function start() {
 ui.start.addEventListener("click", start);
 for (const control of [ui.autoMode, ui.manualMode, ui.streamCount, ui.duration]) control.addEventListener("change", updateSettings);
 ui.stop.addEventListener("click", () => {
-  connectionController?.abort(new DOMException("测速已停止", "AbortError"));
+  connectionController?.abort(new DOMException(t("stopped"), "AbortError"));
   if (speedtest.controller) speedtest.cancel();
   else {
     setRunning(false);
     setStage("stopped");
-    ui.status.textContent = stopMessage;
+    setStatus(stopMessageKey);
   }
 });
 
 window.addEventListener("offline", () => {
   ui.dot.className = "connection-dot disconnected";
   if (running) {
-    stopMessage = "网络连接已断开，请恢复连接后重新测速。";
-    connectionController?.abort(new DOMException(stopMessage, "AbortError"));
-    speedtest.cancel(stopMessage);
+    stopMessageKey = "offline";
+    connectionController?.abort(new DOMException(t(stopMessageKey), "AbortError"));
+    speedtest.cancel(t(stopMessageKey));
   }
 });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden && running) {
-    stopMessage = "页面已切到后台，请保持页面在前台后重新测速。";
-    connectionController?.abort(new DOMException(stopMessage, "AbortError"));
-    speedtest.cancel(stopMessage);
+    stopMessageKey = "hiddenStop";
+    connectionController?.abort(new DOMException(t(stopMessageKey), "AbortError"));
+    speedtest.cancel(t(stopMessageKey));
   }
 });
 
 try {
   const previous = JSON.parse(localStorage.getItem("light-speed:last-result"));
   if (previous && Number.isFinite(previous.downloadMbps) && Number.isFinite(previous.uploadMbps) && !Number.isNaN(Date.parse(previous.completedAt))) {
-    const time = new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(previous.completedAt));
-    ui.previous.textContent = `上次测速 ${time} · 下载 ${formatSpeed(previous.downloadMbps)} · 上传 ${formatSpeed(previous.uploadMbps)}`;
+    previousResult = previous;
     ui.previous.hidden = false;
   }
 } catch { /* Previous results never block a test. */ }
 
-syncSettings();
+function renderPrevious() {
+  if (!previousResult) return;
+  const time = new Intl.DateTimeFormat(getLanguage() === "zh" ? "zh-CN" : "en", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(new Date(previousResult.completedAt));
+  ui.previous.textContent = t("previousResult", { time, download: formatSpeed(previousResult.downloadMbps), upload: formatSpeed(previousResult.uploadMbps) });
+}
+
+function renderLanguage() {
+  applyLanguageText();
+  ui.language.value = getLanguage();
+  ui.moreButton.textContent = t(ui.more.hidden ? "moreInfo" : "lessInfo");
+  ui.startLabel.textContent = t(hasRun ? "retest" : "start");
+  ui.start.setAttribute("aria-label", t(hasRun ? "retest" : "start"));
+  ui.stop.setAttribute("aria-label", t("stop"));
+  ui.phase.textContent = t(`phase${phase[0].toUpperCase()}${phase.slice(1)}`);
+  ui.downloadUnitDescription.textContent = t(ui.downloadUnit.textContent === "Gbps" ? "unitGbpsDescription" : "unitMbpsDescription");
+  if (statusState.key === "statusTransfer") statusState.params.direction = t(phase === "download" ? "downloadLabel" : "uploadLabel");
+  ui.status.textContent = t(statusState.key, statusState.params);
+  if (config) ui.node.textContent = config.nodes[0].name === "默认测速节点" ? t("defaultNode") : config.nodes[0].name;
+  syncSettings();
+  if (testOptions && (running || curves.download.length || curves.upload.length)) {
+    ui.modeLabel.textContent = testOptions.mode === "auto" ? t("automatic") : t("manualModeLabel", { count: transportState?.effectiveStreams || testOptions.streams });
+  }
+  if (transportState) renderTransportMessage();
+  if (lastDiagnostics) updateDiagnostics(lastDiagnostics);
+  else ui.warmup.textContent = t("warmupPending");
+  if (phase === "stopped" || phase === "error") finishInterruptedDiagnostics();
+  if (lastError) showError(lastError, errorDuringTransfer);
+  drawChart();
+  renderPrevious();
+}
+
+ui.moreButton.addEventListener("click", () => {
+  ui.more.hidden = !ui.more.hidden;
+  ui.moreButton.setAttribute("aria-expanded", String(!ui.more.hidden));
+  ui.moreButton.textContent = t(ui.more.hidden ? "moreInfo" : "lessInfo");
+});
+ui.language.addEventListener("change", () => setLanguage(ui.language.value));
+onLanguageChange(renderLanguage);
+
+renderLanguage();
 connect().then(() => {
   setStage("idle");
-  ui.status.textContent = "点击开始，自动测量当前连接。";
+  setStatus("statusIdle");
 }).catch((error) => {
   showError(error);
-  ui.startLabel.textContent = "重试连接";
-  ui.start.setAttribute("aria-label", "重试连接");
+  ui.startLabel.textContent = t("retryConnection");
+  ui.start.setAttribute("aria-label", t("retryConnection"));
 }).finally(() => {
   ui.start.disabled = false;
 });

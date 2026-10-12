@@ -2,6 +2,11 @@ const MIB = 1024 * 1024;
 const bounded = (value, fallback, min, max) => Number.isFinite(value) ? Math.min(max, Math.max(min, Math.round(value))) : fallback;
 const abortError = (message = "测速已停止") => new DOMException(message, "AbortError");
 
+function ensureActive(signal) {
+  if (signal.aborted) throw signal.reason || abortError();
+  if (globalThis.navigator?.onLine === false) throw abortError("网络连接已断开，请恢复连接后重新测速。");
+}
+
 function safeBaseURL(value, page) {
   const url = new URL(value || "/", page);
   if (!/^https?:$/.test(url.protocol) || url.username || url.password || (page.protocol === "https:" && url.protocol !== "https:")) {
@@ -38,9 +43,12 @@ export function normalizeConfig(config, pageURL = globalThis.location?.href || "
     }
   }
   const capacity = originSlots.length;
-  const maxStreams = Math.min(bounded(raw.maxStreams, 24, 1, 48), capacity);
+  const transport = raw.transport === "websocket" ? "websocket" : "http";
+  const maxStreams = transport === "websocket" ? bounded(raw.maxStreams, 30, 1, 30) : Math.min(bounded(raw.maxStreams, 24, 1, 48), capacity);
+  const defaultStreams = bounded(raw.defaultStreams, transport === "websocket" ? 8 : 2, 1, maxStreams);
   const performanceConfig = {
-    measurementOrigins: origins, originSlots, maxStreams, defaultMode: raw.defaultMode === "manual" ? "manual" : "auto",
+    transport, measurementOrigins: origins, originSlots, maxStreams, defaultStreams,
+    defaultMode: raw.defaultMode === "auto" ? "auto" : raw.defaultMode === "manual" || transport === "websocket" ? "manual" : "auto",
     downloadBlockBytes: 25 * MIB, uploadBlockBytes: 25 * MIB,
     maxUploadBodyBytes: bounded(raw.maxUploadBodyBytes, 1024 * MIB, 25 * MIB, 1024 * MIB),
     sharedControlOrigin: origins.some((value) => new URL(value).origin === controlOrigin),
@@ -50,7 +58,7 @@ export function normalizeConfig(config, pageURL = globalThis.location?.href || "
     downloadDurationMs: bounded(input.downloadDurationMs, 10000, 500, 60000),
     uploadDurationMs: bounded(input.uploadDurationMs, 10000, 500, 60000),
     warmupMs: bounded(input.warmupMs, 1500, 0, 10000),
-    minStreams: bounded(input.minStreams, 2, 1, maxStreams), maxStreams,
+    minStreams: bounded(input.minStreams, defaultStreams, 1, maxStreams), maxStreams,
     pingSamples: bounded(input.pingSamples, 8, 1, 20),
   };
   nodes[0].dataOrigins = origins;
@@ -60,7 +68,7 @@ export function normalizeConfig(config, pageURL = globalThis.location?.href || "
 export function normalizeOptions(config, options = {}) {
   const mode = options.mode || config.performance.defaultMode;
   if (mode !== "auto" && mode !== "manual") throw new Error("请选择自动或手动并发模式。");
-  const streams = options.streams ?? config.test.minStreams;
+  const streams = options.streams ?? config.performance.defaultStreams ?? config.test.minStreams;
   if (!Number.isInteger(streams) || streams < 1 || streams > config.performance.maxStreams) throw new Error(`当前部署支持 1 至 ${config.performance.maxStreams} 条并行传输。`);
   if (options.durationMs !== undefined && (!Number.isInteger(options.durationMs) || options.durationMs < 10000 || options.durationMs > 60000)) throw new Error("测量时间应为 10 至 60 秒。");
   if (options.warmupOverride !== undefined && (!Number.isFinite(options.warmupOverride) || options.warmupOverride < 0 || options.warmupOverride > 10000)) throw new Error("预热时间应为 0 至 10 秒。");
@@ -84,6 +92,11 @@ export function chooseConcurrencyTarget(current, previousRate, currentRate, maxS
   if (previousRate === null || currentRate >= previousRate * 1.1) return Math.min(maxStreams, current * 2);
   if (currentRate < previousRate * 1.04) return previousStreams;
   return current;
+}
+
+export function chooseWebSocketMessageBytes(bytes, elapsedMs) {
+  const desired = Math.max(1024, Math.min(MIB, bytes / Math.max(1, elapsedMs) * 20));
+  return 2 ** Math.floor(Math.log2(desired));
 }
 
 export function createUploadBody(baseBlob, bodyBytes) {
@@ -174,7 +187,7 @@ class TransferState {
   }
 
   emitPhase() {
-    this.engine.emit({ type: "phase", phase: this.kind, durationMs: this.durationMs, warmupMs: this.warmupMs, rttMs: this.rttMs, requestedStreams: this.target });
+    this.engine.emit({ type: "phase", phase: this.kind, transport: this.performance.transport || "http", durationMs: this.durationMs, warmupMs: this.warmupMs, rttMs: this.rttMs, requestedStreams: this.target });
   }
 
   captureHeaders(response) {
@@ -190,6 +203,7 @@ class TransferState {
     const activeStreams = Number.isFinite(stats?.activeRequests) && this.kind === "upload" ? stats.activeRequests : open;
     this.peakStreams = Math.max(this.peakStreams, activeStreams);
     return {
+      transport: this.performance.transport || "http",
       mode: this.options.mode, requestedStreams: this.target, activeStreams, peakStreams: this.peakStreams,
       streams: activeStreams, maxStreams: this.performance.maxStreams,
       connections: {
@@ -201,7 +215,7 @@ class TransferState {
       },
       bdpBytes: estimateBDPBytes(toMbps(this.measuredBytes, this.elapsedMs), this.rttMs),
       rttMs: this.rttMs, warmupMs: this.warmupMs,
-      bottleneck: this.lagTicks >= 3 ? "client-scheduling" : this.performance.sharedControlOrigin ? "control-shared-origin" : null,
+      bottleneck: this.lagTicks >= 3 ? "client-scheduling" : this.performance.transport !== "websocket" && this.performance.sharedControlOrigin ? "control-shared-origin" : null,
     };
   }
 
@@ -295,9 +309,10 @@ class TransferState {
 
 // This single implementation runs in a browser Worker and accepts injected I/O for meaningful tests.
 export class MeasurementEngine {
-  constructor({ onUpdate = () => {}, fetchImpl = globalThis.fetch, clock = () => performance.now(), randomFill = (bytes) => crypto.getRandomValues(bytes), taskYield } = {}) {
+  constructor({ onUpdate = () => {}, fetchImpl = globalThis.fetch, webSocketFactory = (url) => new WebSocket(url), clock = () => performance.now(), randomFill = (bytes) => crypto.getRandomValues(bytes), taskYield } = {}) {
     this.onUpdate = onUpdate;
     this.fetch = (...args) => fetchImpl(...args);
+    this.webSocketFactory = (...args) => webSocketFactory(...args);
     this.clock = clock;
     this.randomFill = randomFill;
     this.controller = null;
@@ -357,7 +372,366 @@ export class MeasurementEngine {
     return latencyStatistics(values, failed);
   }
 
+  async probeOrigin(baseUrl, signal, timeoutMs) {
+    ensureActive(signal);
+    const request = requestSignal(signal, timeoutMs);
+    let reader = null;
+    try {
+      const response = await this.fetch(this.url(baseUrl, "download", { bytes: 16384 }), { cache: "no-store", signal: request.signal });
+      const contentType = response.headers.get("Content-Type")?.split(";", 1)[0].trim().toLowerCase();
+      const encoding = response.headers.get("Content-Encoding")?.trim().toLowerCase();
+      if (!response.ok || contentType !== "application/octet-stream" || (encoding && encoding !== "identity") || !response.body?.getReader) {
+        await response.body?.cancel().catch(() => {});
+        return false;
+      }
+      reader = response.body.getReader();
+      // A real first block proves reachability without waiting for the entire probe on a slow link.
+      for (let emptyReads = 0; emptyReads < 4; emptyReads += 1) {
+        const { done, value } = await reader.read();
+        ensureActive(signal);
+        if (done) return false;
+        if (value.byteLength > 0) return true;
+      }
+      return false;
+    } catch (error) {
+      ensureActive(signal);
+      return false;
+    } finally {
+      if (reader) { await reader.cancel().catch(() => {}); reader.releaseLock(); }
+      request.cleanup();
+    }
+  }
+
+  socketExchange(baseUrl, params, signal, callbacks = {}, timeoutMs = 5000) {
+    return new Promise((resolve, reject) => {
+      ensureActive(signal);
+      const address = new URL(this.url(baseUrl, "ws", params));
+      address.protocol = address.protocol === "https:" ? "wss:" : "ws:";
+      let socket;
+      let ready = false;
+      let settled = false;
+      let closeTimer = null;
+      let abortReason = null;
+      const cleanup = () => {
+        clearTimeout(connectTimer);
+        if (closeTimer !== null) clearTimeout(closeTimer);
+        signal.removeEventListener("abort", abort);
+        if (socket) { socket.onmessage = null; socket.onerror = null; socket.onclose = null; }
+      };
+      const finish = (error, value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (error) reject(error); else resolve(value);
+      };
+      const close = () => { try { if (socket?.readyState < 2) socket.close(1000, "measurement_complete"); } catch {} };
+      const abort = () => {
+        abortReason = signal.reason || abortError();
+        close();
+        if (!settled && closeTimer === null) closeTimer = setTimeout(() => finish(abortReason), 2000);
+      };
+      const connectTimer = setTimeout(() => { close(); finish(new Error("WebSocket 测速连接超时")); }, timeoutMs);
+      try {
+        socket = this.webSocketFactory(address.href);
+        socket.binaryType = "arraybuffer";
+        callbacks.onSocket?.(socket);
+        signal.addEventListener("abort", abort, { once: true });
+        if (signal.aborted) { abort(); return; }
+        socket.onmessage = ({ data }) => {
+          if (settled || signal.aborted) return;
+          try {
+            if (typeof data === "string") {
+              const message = JSON.parse(data);
+              if (ready || message.type !== "ready" || typeof message.connectionId !== "string" || typeof message.protocol !== "string") throw new Error("WebSocket 测速响应无效");
+              ready = true;
+              if (params.direction !== "probe") clearTimeout(connectTimer);
+              callbacks.onReady?.(socket, message);
+            } else {
+              if (!ready || !(data instanceof ArrayBuffer || ArrayBuffer.isView(data))) throw new Error("WebSocket 测速数据无效");
+              if (callbacks.onBinary?.(socket, data.byteLength) === false) { finish(null, true); close(); }
+            }
+          } catch (error) { close(); finish(error); }
+        };
+        socket.onerror = () => { close(); finish(abortReason || new Error("WebSocket 测速连接不可用")); };
+        socket.onclose = ({ code, reason }) => {
+          if (abortReason || signal.aborted) finish(abortReason || signal.reason || abortError());
+          else if (callbacks.acceptClose?.(code, reason)) finish(null, true);
+          else finish(new Error("WebSocket 测速连接提前关闭"));
+        };
+      } catch (error) { close(); finish(error); }
+    });
+  }
+
+  async probeWebSocket(node, signal, timeoutMs) {
+    try {
+      return await this.socketExchange(node.baseUrl, { direction: "probe" }, signal, { onBinary: (_, bytes) => bytes > 0 ? false : undefined }, timeoutMs);
+    } catch { ensureActive(signal); return false; }
+  }
+
+  async prepareTransport(config, options, idle, signal) {
+    ensureActive(signal);
+    const requestedTransport = config.performance.transport;
+    const configuredMaxStreams = config.performance.maxStreams;
+    if (requestedTransport === "websocket") {
+      const reachable = await this.probeWebSocket(config.nodes[0], signal, Math.min(8000, Math.ceil(Math.max(5000, 6 * (idle.medianMs || 0) + 500))));
+      ensureActive(signal);
+      if (reachable) {
+        const transport = {
+          type: "transport", transport: "websocket", mode: "single-origin", reason: "configured-origins", fallback: false,
+          origins: [config.nodes[0].baseUrl], unreachableOrigins: [], configuredMaxStreams, maxStreams: configuredMaxStreams,
+          requestedStreams: options.streams, effectiveStreams: options.streams, streamsAdjusted: false, message: null,
+        };
+        this.emit(transport);
+        return { config, options, transport };
+      }
+      config = normalizeConfig({ ...config, performance: { ...config.performance, transport: "http" } }, config.nodes[0].baseUrl);
+    }
+    const configured = config.performance.measurementOrigins;
+    const timeoutMs = Math.min(8000, Math.ceil(Math.max(1500, 6 * (idle.medianMs || 0) + 500)));
+    const checks = await Promise.allSettled(configured.map((origin) => this.probeOrigin(origin, signal, timeoutMs)));
+    ensureActive(signal);
+    const origins = configured.filter((_, index) => checks[index].status === "fulfilled" && checks[index].value);
+    const unreachableOrigins = configured.filter((_, index) => checks[index].status !== "fulfilled" || !checks[index].value);
+    const main = config.nodes[0].baseUrl;
+    const mainOrigin = new URL(main).origin;
+    const hadIndependentOrigins = configured.some((origin) => new URL(origin).origin !== mainOrigin);
+    let fallback = false;
+    if (!origins.length) {
+      // Reuse an identical failed main probe; a retry without a state change would add only delay.
+      const mainIndex = configured.indexOf(main);
+      const mainReachable = mainIndex >= 0 ? false : await this.probeOrigin(main, signal, timeoutMs);
+      ensureActive(signal);
+      if (!mainReachable) {
+        throw new Error(hadIndependentOrigins
+          ? "独立测速端口无法连接，主站测速接口也不可用。请检查防火墙、安全组或反向代理的测速路径。"
+          : "主站测速下载接口不可用，请检查服务和反向代理是否允许测速传输。");
+      }
+      origins.push(main);
+      fallback = true;
+    } else {
+      fallback = hadIndependentOrigins && origins.every((origin) => new URL(origin).origin === mainOrigin);
+    }
+    const effective = normalizeConfig({ ...config, performance: { ...config.performance, measurementOrigins: origins } }, main);
+    const effectiveStreams = Math.min(options.streams, effective.performance.maxStreams);
+    const streamsAdjusted = options.mode === "manual" && effectiveStreams !== options.streams;
+    const mode = origins.length > 1 ? "multi-origin" : "single-origin";
+    const reason = requestedTransport === "websocket" ? "websocket-unavailable" : unreachableOrigins.length ? "unreachable-origins" : mode === "single-origin" ? "single-origin-config" : "configured-origins";
+    let message = requestedTransport === "websocket" ? `WebSocket 测速暂不可用，已改用 HTTP 测速，当前最多 ${effective.performance.maxStreams} 条并行传输。`
+      : fallback ? "独立测速端口暂不可用，已切换为单端口测速。"
+      : unreachableOrigins.length ? "部分测速端口暂不可用，已使用可达连接继续测速。" : null;
+    if (streamsAdjusted) message = `${message || "可用测速连接已调整。"}手动并发已从 ${options.streams} 条调整为 ${effectiveStreams} 条。`;
+    const transport = {
+      type: "transport", transport: "http", mode, reason, fallback: fallback || requestedTransport === "websocket", origins, unreachableOrigins,
+      configuredMaxStreams, maxStreams: effective.performance.maxStreams,
+      requestedStreams: options.streams, effectiveStreams, streamsAdjusted, message,
+    };
+    ensureActive(signal);
+    this.emit(transport);
+    return { config: effective, options: { ...options, streams: effectiveStreams }, transport };
+  }
+
+  captureSocketReady(state, job, message) {
+    job.open = true;
+    state.headerConnections.add(message.connectionId);
+    state.protocols.add(message.protocol);
+    state.peakStreams = Math.max(state.peakStreams, [...state.jobs.values()].filter((item) => item.open).length);
+  }
+
+  async websocketDownloadPhase(node, test, performanceConfig, options, idle, globalSignal) {
+    const state = new TransferState(this, "download", node, test, performanceConfig, options, idle, globalSignal);
+    const random = new Uint8Array(12);
+    this.randomFill(random);
+    const run = Array.from(random, (byte) => byte.toString(16).padStart(2, "0")).join("");
+    const launch = async (_, job) => {
+      let failures = 0;
+      while (!job.controller.signal.aborted && this.clock() < state.ends) {
+        state.requests += 1;
+        let feedbackTime = this.clock();
+        let feedbackBytes = 0;
+        let messageBytes = 4096;
+        let first = true;
+        try {
+          await this.socketExchange(node.baseUrl, { direction: "download", run }, job.controller.signal, {
+            onSocket: (socket) => { job.socket = socket; },
+            onReady: (_, ready) => this.captureSocketReady(state, job, ready),
+            onBinary: (socket, bytes) => {
+              const now = this.clock();
+              job.received ||= bytes > 0;
+              state.totalBytes += bytes;
+              if (now >= state.measurementStart && now <= state.ends) state.measuredBytes += bytes;
+              feedbackBytes += bytes;
+              failures = 0;
+              if (now < state.ends && (first || now - feedbackTime >= 250)) {
+                const next = chooseWebSocketMessageBytes(feedbackBytes, now - feedbackTime);
+                if (next !== messageBytes && socket.readyState === 1 && socket.bufferedAmount < 65536) {
+                  socket.send(JSON.stringify({ type: "resize", bytes: next }));
+                  messageBytes = next;
+                }
+                first = false;
+                feedbackTime = now;
+                feedbackBytes = 0;
+              }
+            },
+          }, Math.max(5000, 6 * state.rttMs));
+        } catch (error) {
+          if (job.controller.signal.aborted) { if (!job.received) state.cancelledRequests += 1; break; }
+          state.failedRequests += 1;
+          if (++failures >= 3) { job.exhausted = true; break; }
+          await pause(180 * failures, job.controller.signal).catch(() => {});
+        } finally { job.open = false; job.socket = null; }
+      }
+    };
+    state.emitPhase();
+    state.resize(launch);
+    const latencyJob = state.loadedLatency();
+    const statsJob = (async () => {
+      while (!state.controller.signal.aborted) {
+        try { state.serverStats = await this.json(this.url(node.baseUrl, "connection-stats", { run }), {}, state.controller.signal, Math.max(5000, 6 * state.rttMs)); }
+        catch { /* A socket's ready message still supplies independently observed connection metadata. */ }
+        await pause(900, state.controller.signal).catch(() => {});
+      }
+    })();
+    const ticker = setInterval(() => state.tick(launch), 200);
+    let result = null;
+    try {
+      await pause(state.warmupMs + state.durationMs, state.controller.signal);
+      state.tick(launch);
+      result = state.result();
+      this.emit({ type: "phase-complete", phase: "download", result });
+      return result;
+    } finally {
+      clearInterval(ticker);
+      await state.cleanup();
+      await Promise.allSettled([latencyJob, statsJob]);
+      if (result) {
+        try {
+          state.serverStats = await this.json(this.url(node.baseUrl, "connection-stats", { run }), {}, globalSignal, Math.max(1500, 3 * state.rttMs));
+          Object.assign(result, state.metadata());
+        } catch { result.connections.active = null; }
+        result.activeStreams = 0;
+        result.streams = 0;
+      }
+    }
+  }
+
+  async websocketUploadPhase(node, test, performanceConfig, options, idle, globalSignal) {
+    const state = new TransferState(this, "upload", node, test, performanceConfig, options, idle, globalSignal);
+    const timeoutMs = Math.min(15000, Math.max(5000, 8 * state.rttMs));
+    let session = null;
+    let ticker = null;
+    let pumpJob = null;
+    let latencyJob = null;
+    let result = null;
+    let deleting = null;
+    const payloads = [];
+    const launch = async (index, job) => {
+      let failures = 0;
+      job.payloadIndex = index % payloads.length;
+      while (!job.controller.signal.aborted && !state.windowFinished) {
+        state.requests += 1;
+        try {
+          await this.socketExchange(node.baseUrl, { direction: "upload", session: session.id }, job.controller.signal, {
+            onSocket: (socket) => { job.socket = socket; },
+            onReady: (_, ready) => this.captureSocketReady(state, job, ready),
+            acceptClose: (code, reason) => {
+              if (code === 1000 && reason === "session_finished") { state.windowFinished = true; return true; }
+              return false;
+            },
+          }, timeoutMs);
+          if (state.windowFinished) break;
+        } catch (error) {
+          if (job.controller.signal.aborted) { state.cancelledRequests += 1; break; }
+          state.failedRequests += 1;
+          if (++failures >= 3) { job.exhausted = true; break; }
+          await pause(180 * failures, job.controller.signal).catch(() => {});
+        } finally { job.open = false; job.socket = null; }
+      }
+    };
+    try {
+      session = await this.json(this.url(node.baseUrl, "upload-sessions"), {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ warmupMs: state.warmupMs, durationMs: state.durationMs }),
+      }, state.controller.signal, timeoutMs);
+      if (!session || typeof session.id !== "string") throw new Error("上传测速会话无效，请更新服务后重试。");
+      this.emit({ type: "session-created", id: session.id, baseUrl: node.baseUrl });
+      const base = this.createRandomBlob(performanceConfig.uploadBlockBytes);
+      for (let offset = 0; offset < base.size; offset += MIB) payloads.push(base.slice(offset, Math.min(offset + MIB, base.size)));
+      state.began = this.clock();
+      state.lastProbeTime = state.began;
+      state.emitPhase();
+      state.resize(launch);
+      latencyJob = state.loadedLatency();
+      pumpJob = (async () => {
+        while (!state.controller.signal.aborted && !state.windowFinished) {
+          let sentAny = false;
+          for (const job of state.jobs.values()) {
+            const socket = job.socket;
+            if (!job.open || job.controller.signal.aborted || socket?.readyState !== 1) continue;
+            for (let sent = 0; sent < 4; sent += 1) {
+              const payload = payloads[job.payloadIndex % payloads.length];
+              if (socket.bufferedAmount + payload.size > 4 * MIB) break;
+              try { socket.send(payload); job.payloadIndex += 1; sentAny = true; }
+              catch { try { socket.close(); } catch {} break; }
+            }
+          }
+          if (sentAny) await this.yieldReaders();
+          else await pause(2, state.controller.signal).catch(() => {});
+        }
+      })();
+      ticker = setInterval(() => state.tick(launch), 200);
+      let failures = 0;
+      while (!state.controller.signal.aborted) {
+        if (this.clock() - state.began > state.warmupMs + state.durationMs + state.startupAllowanceMs + timeoutMs) throw new Error("上传测速超时，请检查服务和网络后重试。");
+        let snapshot;
+        try {
+          state.requests += 1;
+          snapshot = await this.json(this.url(node.baseUrl, `upload-sessions/${encodeURIComponent(session.id)}`), {}, state.controller.signal, timeoutMs);
+          failures = 0;
+        } catch (error) {
+          if (state.controller.signal.aborted) throw state.controller.signal.reason || error;
+          state.failedRequests += 1;
+          if (++failures >= 3) throw new Error("无法获取上传进度，请检查连接后重试。");
+          await pause(300, state.controller.signal);
+          continue;
+        }
+        if (!snapshot || !Number.isFinite(snapshot.measuredBytes) || !Number.isFinite(snapshot.totalBytes) || !Number.isFinite(snapshot.measurementElapsedMs) || snapshot.measuredBytes < 0 || snapshot.measurementElapsedMs < 0 || snapshot.measurementElapsedMs > state.durationMs + 1) throw new Error("上传测速进度无效，请更新服务后重试。");
+        state.measuredBytes = snapshot.measuredBytes;
+        state.totalBytes = snapshot.totalBytes;
+        state.elapsedMs = snapshot.measurementElapsedMs;
+        state.serverStats = snapshot;
+        if (snapshot.finished) {
+          state.windowFinished = true;
+          state.tick(launch);
+          result = state.result();
+          this.emit({ type: "phase-complete", phase: "upload", result });
+          return result;
+        }
+        await pause(200, state.controller.signal);
+      }
+      throw state.controller.signal.reason || abortError();
+    } finally {
+      if (ticker !== null) clearInterval(ticker);
+      // close() is queued behind pending browser data. DELETE forces server-side sockets closed first.
+      if (session && !result) deleting = this.json(this.url(node.baseUrl, `upload-sessions/${encodeURIComponent(session.id)}`), { method: "DELETE" }, undefined, 1500).catch(() => {});
+      await state.cleanup();
+      if (latencyJob) await Promise.allSettled([latencyJob]);
+      if (pumpJob) await Promise.allSettled([pumpJob]);
+      if (session) {
+        if (result) {
+          try {
+            state.serverStats = await this.json(this.url(node.baseUrl, `upload-sessions/${encodeURIComponent(session.id)}`), {}, globalSignal, Math.max(1500, 3 * state.rttMs));
+            Object.assign(result, state.metadata());
+          } catch { result.connections.active = null; }
+          result.activeStreams = 0;
+          result.streams = 0;
+          deleting = this.json(this.url(node.baseUrl, `upload-sessions/${encodeURIComponent(session.id)}`), { method: "DELETE" }, undefined, 1500).catch(() => {});
+        }
+        await deleting;
+      }
+    }
+  }
+
   async downloadPhase(node, test, performanceConfig, options, idle, globalSignal) {
+    if (performanceConfig.transport === "websocket") return this.websocketDownloadPhase(node, test, performanceConfig, options, idle, globalSignal);
     const state = new TransferState(this, "download", node, test, performanceConfig, options, idle, globalSignal);
     const runBytes = new Uint8Array(12);
     this.randomFill(runBytes);
@@ -442,6 +816,7 @@ export class MeasurementEngine {
   }
 
   async uploadPhase(node, test, performanceConfig, options, idle, globalSignal) {
+    if (performanceConfig.transport === "websocket") return this.websocketUploadPhase(node, test, performanceConfig, options, idle, globalSignal);
     const state = new TransferState(this, "upload", node, test, performanceConfig, options, idle, globalSignal);
     const timeoutMs = Math.min(15000, Math.max(5000, 8 * state.rttMs));
     let session = null;
@@ -553,12 +928,16 @@ export class MeasurementEngine {
     try {
       const startedAt = new Date().toISOString();
       const idle = await this.idleLatency(node, normalized.test.pingSamples, controller.signal);
-      const download = await this.downloadPhase(node, normalized.test, normalized.performance, options, idle, controller.signal);
+      const prepared = await this.prepareTransport(normalized, options, idle, controller.signal);
+      ensureActive(controller.signal);
+      const effective = prepared.config;
+      const effectiveNode = effective.nodes[0];
+      const download = await this.downloadPhase(effectiveNode, effective.test, effective.performance, prepared.options, idle, controller.signal);
       if (controller.signal.aborted) throw controller.signal.reason || abortError();
-      const upload = await this.uploadPhase(node, normalized.test, normalized.performance, options, idle, controller.signal);
+      const upload = await this.uploadPhase(effectiveNode, effective.test, effective.performance, prepared.options, idle, controller.signal);
       if (controller.signal.aborted) throw controller.signal.reason || abortError();
       const result = {
-        startedAt, completedAt: new Date().toISOString(), node, mode: options.mode,
+        startedAt, completedAt: new Date().toISOString(), node: effectiveNode, mode: options.mode, transport: prepared.transport,
         downloadMbps: download.mbps, uploadMbps: upload.mbps, latency: { idle, download: download.latency, upload: upload.latency }, download, upload,
       };
       this.emit({ type: "complete", result });
