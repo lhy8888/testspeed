@@ -187,7 +187,7 @@ try {
   console.log('PASS offline transition cancels active worker transfers');
   await failed.context.close();
 
-  const unavailableContext = await browser.newContext();
+  const unavailableContext = await browser.newContext({ locale: 'en-US' });
   const unavailablePage = await unavailableContext.newPage();
   unavailablePage.on('pageerror', error => runtimeErrors.push(error.message));
   await unavailableContext.route('**/api/config*', route => route.fulfill({ status: 503, contentType: 'application/json', body: '{"error":"test unavailable"}' }));
@@ -201,7 +201,7 @@ try {
   await unavailablePage.locator('#stop-button').click();
   await waitPhase(unavailablePage, '测速已停止');
   await unavailablePage.waitForTimeout(600);
-  assert.equal(await unavailablePage.locator('#phase-label').textContent(), '测速已停止');
+  assert.equal(await unavailablePage.locator('#phase-label').getAttribute('data-phase'), 'stopped', 'a late configuration response must keep the localized UI stopped');
   console.log('PASS configuration error and cancellation during reconnect');
   await unavailableContext.close();
   assert.deepEqual(runtimeErrors, [], 'browser must have no uncaught JavaScript errors');

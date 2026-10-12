@@ -139,7 +139,7 @@ try {
     await state.page.locator('#error-message').waitFor({ state: 'visible', timeout: 20000 });
     const message = (await state.page.locator('#error-message').textContent()).trim();
     assert.ok(message.length > 0);
-    assert.notEqual(await state.page.locator('#phase-label').textContent(), '测速完成');
+    assert.notEqual(await state.page.locator('#phase-label').getAttribute('data-phase'), 'complete');
     assert.equal(state.requests.filter(request => request.path === '/api/upload').length, 0, 'unreachable control service must not produce a false completed upload');
     assert.deepEqual(state.errors, []);
     await state.page.screenshot({ path: join(artifacts, 'control-and-data-unreachable.png'), fullPage: true });
