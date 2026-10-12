@@ -4,7 +4,7 @@ set -euo pipefail
 repository_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$repository_root"
 
-for required_file in README.md deploy/testspeed.service deploy/testspeed.env.example deploy/manage.sh docs/deployment.md; do
+for required_file in README.md THIRD_PARTY_NOTICES.md deploy/testspeed.service deploy/testspeed.env.example deploy/manage.sh docs/deployment.md; do
   if [[ ! -f "$required_file" ]]; then
     printf 'Missing package file: %s\n' "$required_file" >&2
     exit 1
@@ -52,17 +52,18 @@ for target in "${targets[@]}"; do
     go build -trimpath -ldflags='-s -w' -o "$package_directory/$client_name" ./tools/throughput
 
   cp README.md "$package_directory/README.md"
+  cp THIRD_PARTY_NOTICES.md "$package_directory/THIRD_PARTY_NOTICES.md"
   cp deploy/testspeed.service "$package_directory/testspeed.service"
   cp deploy/testspeed.env.example "$package_directory/testspeed.env.example"
   cp deploy/manage.sh "$package_directory/manage.sh"
   cp docs/deployment.md "$package_directory/deployment.md"
   printf '%s\n' "$release_version" > "$package_directory/VERSION"
   chmod 755 "$package_directory/$application_name" "$package_directory/$client_name" "$package_directory/manage.sh"
-  chmod 644 "$package_directory/README.md" "$package_directory/testspeed.service" "$package_directory/testspeed.env.example" "$package_directory/deployment.md" "$package_directory/VERSION"
+  chmod 644 "$package_directory/README.md" "$package_directory/THIRD_PARTY_NOTICES.md" "$package_directory/testspeed.service" "$package_directory/testspeed.env.example" "$package_directory/deployment.md" "$package_directory/VERSION"
 
   archive_name="$package_name.tar.gz"
   tar -czf "$distribution_directory/$archive_name" -C "$package_directory" \
-    "$application_name" "$client_name" README.md testspeed.service testspeed.env.example manage.sh deployment.md VERSION
+    "$application_name" "$client_name" README.md THIRD_PARTY_NOTICES.md testspeed.service testspeed.env.example manage.sh deployment.md VERSION
   archives+=("$archive_name")
 done
 

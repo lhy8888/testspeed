@@ -36,6 +36,9 @@ type speedServer struct {
 	webSockets       socketRegistry
 	preparedDownload map[int]*websocket.PreparedMessage
 	network          *networkService
+	sharing          *shareService
+	closeOnce        sync.Once
+	closeError       error
 }
 
 func newSpeedServer(config Config, web fs.FS) (*speedServer, error) {
@@ -53,18 +56,39 @@ func newSpeedServer(config Config, web fs.FS) (*speedServer, error) {
 	if limit == 0 {
 		limit = 256
 	}
+	network, err := newConfiguredNetworkService(config)
+	if err != nil {
+		return nil, err
+	}
+	sharing, err := newShareService(config)
+	if err != nil {
+		_ = network.Close()
+		return nil, err
+	}
 	server := &speedServer{
 		config: config, web: web, payload: payload,
 		requests:    make(chan struct{}, config.MaxConcurrentRequests),
 		sessions:    &uploadSessions{entries: make(map[string]*uploadSession), limit: limit},
 		runs:        downloadRuns{entries: make(map[string]*downloadRun)},
 		readBuffers: sync.Pool{New: func() any { buffer := make([]byte, 64<<10); return &buffer }},
-		network:     newNetworkService(),
+		network:     network,
+		sharing:     sharing,
 	}
 	if err := server.prepareWebSocketData(); err != nil {
+		_ = server.Close()
 		return nil, err
 	}
 	return server, nil
+}
+
+// Call after listeners and their active requests have stopped. This also
+// releases optional database readers if listener binding failed at startup.
+func (server *speedServer) Close() error {
+	server.closeOnce.Do(func() {
+		server.closeWebSockets()
+		server.closeError = errors.Join(server.network.Close(), server.sharing.Close())
+	})
+	return server.closeError
 }
 
 func (server *speedServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -79,6 +103,10 @@ func (server *speedServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/api/upload-sessions" || strings.HasPrefix(r.URL.Path, "/api/upload-sessions/") {
 		server.sessionRoute(w, r)
+		return
+	}
+	if r.URL.Path == "/api/results" || strings.HasPrefix(r.URL.Path, "/api/results/") {
+		server.sharing.ServeHTTP(w, r)
 		return
 	}
 	switch r.URL.Path {

@@ -135,6 +135,8 @@ jobs:
           docker build --tag testspeed:ci . 2>&1 | tee "$TEST_ARTIFACT_DIR/docker-build.log"
       - name: Verify normal Compose and Snap override on standard Docker
         run: python3 tools/verify-compose.py 2>&1 | tee "$TEST_ARTIFACT_DIR/compose-snap-validation.log"
+      - name: Verify optional SQLite sharing on a non-root read-only container
+        run: python3 tools/verify-sharing.py 2>&1 | tee "$TEST_ARTIFACT_DIR/compose-sharing-validation.log"
       - name: Start default single-port WebSocket container and check protocol v2
         run: |
           docker run --detach --name testspeed-ci --read-only --cap-drop ALL --security-opt no-new-privileges --publish 127.0.0.1:8080:8080 testspeed:ci
@@ -183,6 +185,40 @@ jobs:
         run: node tests/browser-ui.mjs 2>&1 | tee "$TEST_ARTIFACT_DIR/browser-ui.log"
       - name: Browser IP, locations, pending zero and GeoIP failure handling
         run: node tests/browser-network-info.mjs 2>&1 | tee "$TEST_ARTIFACT_DIR/browser-network-info.log"
+      - name: Start explicit sharing fixtures with and without a write token
+        run: |
+          for port in 9515 9516; do
+            token_args=()
+            if [ "$port" = 9516 ]; then token_args=(--env SHARE_WRITE_TOKEN=testspeed-ci-share-token); fi
+            docker run --detach --name "testspeed-share-$port-ci" --read-only --cap-drop ALL --security-opt no-new-privileges \
+              --tmpfs /var/lib/testspeed:rw,uid=65532,gid=65532,mode=0750 \
+              --env GEOIP_ENABLED=false --env SHARE_DB_PATH=/var/lib/testspeed/results.sqlite \
+              "${token_args[@]}" --publish "127.0.0.1:$port:8080" testspeed:ci
+            for attempt in {1..30}; do
+              if curl --fail --silent --connect-timeout 1 --max-time 2 "http://127.0.0.1:$port/healthz" > /dev/null; then break; fi
+              sleep 1
+            done
+            curl --fail --silent --show-error "http://127.0.0.1:$port/healthz"
+          done
+      - name: Browser real measurement selection, adaptive duration, budget, local history and exports
+        env:
+          SHARE_BASE_URL: http://127.0.0.1:9515
+          SHARE_TOKEN_BASE_URL: http://127.0.0.1:9516
+          FEATURE_SHARE_TOKEN: testspeed-ci-share-token
+          FEATURE_REQUIRE_SHARE: '1'
+        run: node tests/browser-features.mjs 2>&1 | tee "$TEST_ARTIFACT_DIR/browser-features.log"
+      - name: Browser both-direction stable and budget completion on WebSocket and HTTP
+        env:
+          HTTP_SINGLE_BASE_URL: http://127.0.0.1:9490
+          POLICY_REQUIRE_HTTP: '1'
+        run: node tests/browser-measurement-policies.mjs 2>&1 | tee "$TEST_ARTIFACT_DIR/browser-measurement-policies.log"
+      - name: Browser optional shared results, literal text and revocation
+        env:
+          BASE_URL: http://127.0.0.1:9516
+          SHARE_WRITE_TOKEN: testspeed-ci-share-token
+        run: node tests/browser-share.mjs 2>&1 | tee "$TEST_ARTIFACT_DIR/browser-share.log"
+      - name: Browser stability sampling, CSV, lifecycle and production CSP
+        run: node tests/browser-stability.mjs 2>&1 | tee "$TEST_ARTIFACT_DIR/browser-stability.log"
       - name: Browser optional HTTP network reachability and single-port fallback
         env:
           MULTIPORT_BASE_URL: http://127.0.0.1:9480
@@ -201,7 +237,7 @@ jobs:
         if: always()
         run: |
           mkdir -p "$TEST_ARTIFACT_DIR"
-          for container in testspeed-ci testspeed-http-ci testspeed-single-port-ci; do
+          for container in testspeed-ci testspeed-http-ci testspeed-single-port-ci testspeed-share-9515-ci testspeed-share-9516-ci; do
             docker logs "$container" > "$TEST_ARTIFACT_DIR/$container.log" 2>&1 || true
             docker rm --force "$container" || true
           done

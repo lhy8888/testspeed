@@ -18,6 +18,8 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
+StateDirectory=testspeed
+StateDirectoryMode=0750
 
 [Install]
 WantedBy=multi-user.target

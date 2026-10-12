@@ -27,11 +27,14 @@ type networkLocation struct {
 }
 
 type networkParty struct {
-	IP       string          `json:"ip"`
-	Scope    string          `json:"scope"`
-	Name     string          `json:"name,omitempty"`
-	Proxied  bool            `json:"proxied,omitempty"`
-	Location networkLocation `json:"location"`
+	IP            string          `json:"ip"`
+	Scope         string          `json:"scope"`
+	Name          string          `json:"name,omitempty"`
+	Proxied       bool            `json:"proxied,omitempty"`
+	ISP           string          `json:"isp,omitempty"`
+	ASN           string          `json:"asn,omitempty"`
+	NetworkSource string          `json:"networkSource,omitempty"`
+	Location      networkLocation `json:"location"`
 }
 
 type networkInfo struct {
@@ -40,8 +43,11 @@ type networkInfo struct {
 }
 
 type geoResult struct {
-	IP       string
-	Location networkLocation
+	IP            string
+	Location      networkLocation
+	ISP           string
+	ASN           string
+	NetworkSource string
 }
 type geoCacheEntry struct {
 	result   geoResult
@@ -54,6 +60,9 @@ type geoPending struct {
 }
 type networkService struct {
 	client        *http.Client
+	enabled       bool
+	provider      string
+	offline       *offlineGeoDB
 	mu            sync.Mutex
 	cache         map[string]geoCacheEntry
 	pending       map[string]*geoPending
@@ -65,6 +74,7 @@ type networkService struct {
 
 func newNetworkService() *networkService {
 	return &networkService{
+		provider: "auto", enabled: true,
 		client: &http.Client{Timeout: 1500 * time.Millisecond, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 		cache:  make(map[string]geoCacheEntry), pending: make(map[string]*geoPending), requests: make(chan struct{}, 4),
 		tokens: 4, lastRefill: time.Now(),
@@ -76,8 +86,20 @@ func unavailableGeo() geoResult {
 }
 
 func (service *networkService) lookup(ctx context.Context, ip string) geoResult {
-	if ctx.Err() != nil {
+	if !service.enabled || ctx.Err() != nil {
 		return unavailableGeo()
+	}
+	// Only canonical public addresses can become lookup targets. The empty
+	// address is reserved for an online observation of this server's egress IP.
+	if ip != "" {
+		address, err := netip.ParseAddr(ip)
+		if err != nil || address.Zone() != "" || addressScope(address.Unmap()) != "public" {
+			return unavailableGeo()
+		}
+		ip = address.Unmap().String()
+	}
+	if service.provider == "offline" {
+		return service.lookupOffline(ip)
 	}
 	service.mu.Lock()
 	now := time.Now()
@@ -100,7 +122,7 @@ func (service *networkService) lookup(ctx context.Context, ip string) geoResult 
 	case service.requests <- struct{}{}:
 	default:
 		service.mu.Unlock()
-		return unavailableGeo()
+		return service.offlineFallback(ip, unavailableGeo())
 	}
 	// Forty new requests per minute plus a burst of four stays below the free
 	// provider's shared sixty-per-minute limit. Cache hits consume no tokens.
@@ -109,16 +131,16 @@ func (service *networkService) lookup(ctx context.Context, ip string) geoResult 
 	if now.Before(service.cooldownUntil) || service.tokens < 1 {
 		<-service.requests
 		service.mu.Unlock()
-		return unavailableGeo()
+		return service.offlineFallback(ip, unavailableGeo())
 	}
 	service.tokens--
 	pending := &geoPending{done: make(chan struct{})}
 	service.pending[ip] = pending
 	service.mu.Unlock()
-	result := service.fetch(ctx, ip)
+	result := service.offlineFallback(ip, service.fetch(ctx, ip))
 	service.mu.Lock()
 	ttl := time.Minute
-	if result.Location.Status == "resolved" {
+	if result.Location.Status == "resolved" || result.ISP != "" || result.ASN != "" {
 		ttl = time.Hour
 	}
 	if len(service.cache) >= 256 {
@@ -146,6 +168,32 @@ func cleanLocationText(value string) string {
 		return ""
 	}
 	return value
+}
+
+func cleanCountryCode(value string) string {
+	code := strings.ToUpper(strings.TrimSpace(value))
+	if len(code) == 2 && code[0] >= 'A' && code[0] <= 'Z' && code[1] >= 'A' && code[1] <= 'Z' {
+		return code
+	}
+	return ""
+}
+
+func cleanASN(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.TrimPrefix(strings.ToUpper(value), "AS")
+	if len(value) == 0 || len(value) > 10 {
+		return ""
+	}
+	for _, digit := range value {
+		if digit < '0' || digit > '9' {
+			return ""
+		}
+	}
+	number, err := strconv.ParseUint(value, 10, 32)
+	if err != nil || number == 0 {
+		return ""
+	}
+	return "AS" + strconv.FormatUint(number, 10)
 }
 
 func (service *networkService) fetch(ctx context.Context, ip string) geoResult {
@@ -184,11 +232,13 @@ func (service *networkService) fetch(ctx context.Context, ip string) geoResult {
 		return unavailableGeo()
 	}
 	type providerResult struct {
-		IP          string `json:"ipAddress"`
-		Country     string `json:"countryName"`
-		CountryCode string `json:"countryCode"`
-		Region      string `json:"regionName"`
-		City        string `json:"cityName"`
+		IP           string `json:"ipAddress"`
+		Country      string `json:"countryName"`
+		CountryCode  string `json:"countryCode"`
+		Region       string `json:"regionName"`
+		City         string `json:"cityName"`
+		ASN          string `json:"asn"`
+		Organization string `json:"asnOrganization"`
 	}
 	var output providerResult
 	body = []byte(strings.TrimSpace(string(body)))
@@ -209,14 +259,21 @@ func (service *networkService) fetch(ctx context.Context, ip string) geoResult {
 		return unavailableGeo()
 	}
 	location := networkLocation{Country: cleanLocationText(output.Country), Region: cleanLocationText(output.Region), City: cleanLocationText(output.City), Source: "geoip", Status: "resolved", Approximate: true}
-	code := strings.ToUpper(output.CountryCode)
-	if len(code) == 2 && code[0] >= 'A' && code[0] <= 'Z' && code[1] >= 'A' && code[1] <= 'Z' {
-		location.CountryCode = code
+	location.CountryCode = cleanCountryCode(output.CountryCode)
+	isp, asn := cleanLocationText(output.Organization), cleanASN(output.ASN)
+	if location.Country == "" && location.Region == "" && location.City == "" && location.CountryCode == "" {
+		location = unavailableGeo().Location
 	}
-	if location.Country == "" && location.Region == "" && location.City == "" {
-		return unavailableGeo()
+	if location.Status != "resolved" && isp == "" && asn == "" {
+		// A valid, matching IP is still an observation: auto mode can use it
+		// for a local database fallback, including this server's egress address.
+		return geoResult{IP: address.Unmap().String(), Location: unavailableGeo().Location}
 	}
-	return geoResult{IP: address.Unmap().String(), Location: location}
+	result := geoResult{IP: address.Unmap().String(), Location: location, ISP: isp, ASN: asn}
+	if isp != "" || asn != "" {
+		result.NetworkSource = "geoip"
+	}
+	return result
 }
 
 func maxTime(a, b time.Time) time.Time {
@@ -446,6 +503,9 @@ func (server *speedServer) networkInfo(w http.ResponseWriter, r *http.Request) {
 	var tasks sync.WaitGroup
 	if info.Client.Scope != "public" {
 		info.Client.Location = networkLocation{Source: "network", Status: "internal"}
+		if server.config.ClientNetworkLabel != "" && info.Client.Scope != "unknown" {
+			info.Client.Location = networkLocation{Label: server.config.ClientNetworkLabel, Source: "configured", Status: "resolved"}
+		}
 		if info.Client.Scope == "unknown" {
 			info.Client.Location = unavailableGeo().Location
 		}
@@ -455,7 +515,8 @@ func (server *speedServer) networkInfo(w http.ResponseWriter, r *http.Request) {
 		tasks.Add(1)
 		go func() {
 			defer tasks.Done()
-			info.Client.Location = server.network.lookup(r.Context(), clientIP).Location
+			result := server.network.lookup(r.Context(), clientIP)
+			info.Client.Location, info.Client.ISP, info.Client.ASN, info.Client.NetworkSource = result.Location, result.ISP, result.ASN, result.NetworkSource
 		}()
 	}
 	if server.config.ServerLocation != "" {
@@ -469,6 +530,7 @@ func (server *speedServer) networkInfo(w http.ResponseWriter, r *http.Request) {
 			result := server.network.lookup(r.Context(), "")
 			info.Server.IP = result.IP
 			info.Server.Location = result.Location
+			info.Server.ISP, info.Server.ASN, info.Server.NetworkSource = result.ISP, result.ASN, result.NetworkSource
 			if result.IP != "" {
 				address, _ := netip.ParseAddr(result.IP)
 				info.Server.Scope = addressScope(address)

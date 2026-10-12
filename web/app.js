@@ -1,5 +1,6 @@
 import { loadConfig, SpeedTest } from "./speedtest.js";
 import { t, setLanguage, getLanguage, applyLanguageText, onLanguageChange, translateError, localizeCountry } from "./i18n.js";
+import { SETTINGS_KEY, normalizeSettings, readSettings, readHistory, appendHistory, clearHistory, normalizeResult, toShareRecord, resultJSON, resultsCSV } from "./results.js";
 
 const element = (id) => document.getElementById(id);
 const ui = {
@@ -23,6 +24,12 @@ const ui = {
   transportMessage: element("transport-message"),
   clientIp: element("client-ip"), clientLocation: element("client-location"), serverLocation: element("server-location"),
   clientLocationNote: element("client-location-note"), serverLocationNote: element("server-location-note"),
+  clientIsp: element("client-isp"), clientAsn: element("client-asn"), serverIsp: element("server-isp"),
+  testType: element("test-type"), policy: element("measurement-policy"), budget: element("traffic-budget"), title: element("page-title"),
+  customBudget: element("custom-budget-mib"), customBudgetRow: element("custom-budget-row"),
+  completionNote: element("completion-note"), historySelect: element("history-select"), historyClear: element("history-clear"), historySummary: element("history-summary"), historyStatus: element("history-status"),
+  exportJSON: element("export-json"), exportCSV: element("export-csv"), exportPNG: element("export-png"), exportHistoryCSV: element("export-history-csv"),
+  shareTools: element("share-tools"), shareTokenLabel: element("share-token-label"), shareToken: element("share-token"), shareResult: element("share-result"), shareRevoke: element("share-revoke"), shareStatus: element("share-status"), shareLink: element("share-link"),
   more: element("more-details"), moreButton: element("more-info-button"), language: element("language-select"),
 };
 let config = null;
@@ -47,17 +54,19 @@ let peakConnections = 0;
 let testOptions = null;
 let transportState = null;
 let runtimeMaxStreams = null;
-let settings = { mode: "manual", streams: 8, durationMs: null };
-let hasSavedSettings = false;
+let storage = null;
+try { storage = globalThis.localStorage; } catch { /* Private browsing still supports tests and session-only history. */ }
+const savedSettings = readSettings(storage);
+let settings = savedSettings.settings;
+let hasSavedSettings = savedSettings.saved;
 let networkInfo = { status: "loading", data: null };
-const settingsKey = "light-speed:settings:v3";
-
-try {
-  const saved = JSON.parse(localStorage.getItem(settingsKey));
-  if (saved && (saved.mode === "auto" || saved.mode === "manual")) { settings.mode = saved.mode; hasSavedSettings = true; }
-  if (Number.isInteger(saved?.streams) && saved.streams >= 1) { settings.streams = Math.min(saved.streams, 30); hasSavedSettings = true; }
-  if ([10000, 20000, 30000].includes(saved?.durationMs)) { settings.durationMs = saved.durationMs; hasSavedSettings = true; }
-} catch { /* Settings are optional when local storage is unavailable. */ }
+let displayType = settings.testType;
+let history = readHistory(storage);
+let lastResult = null;
+let activeShare = null;
+let shareBusy = false;
+let historyStatusKey = "";
+let shareStatusKey = "";
 
 const number = (value, decimals = 1) => {
   if (value === null || !Number.isFinite(value)) return "—";
@@ -83,6 +92,7 @@ function setSpeed(kind, value, { preview = false } = {}) {
   const measured = Number.isFinite(value) && value >= 0;
   target.textContent = measured ? speedNumber(value) : "0";
   target.classList.toggle("is-pending", !measured);
+  delete target.dataset.skipped;
   if (measured && !preview) target.dataset.mbps = String(value);
   else delete target.dataset.mbps;
   if (measured && preview) target.dataset.previewMbps = String(value);
@@ -96,6 +106,33 @@ function setSpeed(kind, value, { preview = false } = {}) {
 }
 
 const setDownload = (value, options) => setSpeed("download", value, options);
+
+function setHeroLatency(value, settled = false) {
+  const measured = Number.isFinite(value) && value >= 0;
+  ui.download.textContent = measured ? number(value) : "0";
+  ui.download.classList.toggle("is-pending", !measured);
+  ui.download.classList.toggle("is-settled", measured && settled);
+  ui.download.classList.toggle("compact", ui.download.textContent.length > 5);
+  delete ui.download.dataset.mbps;
+  delete ui.download.dataset.previewMbps;
+  if (measured) ui.download.dataset.latencyMs = String(value);
+  else delete ui.download.dataset.latencyMs;
+  ui.downloadUnit.textContent = "ms";
+  ui.downloadUnitDescription.textContent = t("unitMsDescription");
+}
+
+function setSkipped(kind) {
+  setSpeed(kind, null);
+  (kind === "download" ? ui.download : ui.upload).textContent = t("notTested");
+  (kind === "download" ? ui.download : ui.upload).dataset.skipped = "true";
+  (kind === "download" ? ui.downloadUnit : ui.uploadUnit).textContent = "";
+}
+
+function renderHeroTitle() {
+  const key = displayType === "latency" ? "latencyPageTitle" : "pageTitle";
+  ui.title.dataset.i18n = key;
+  ui.title.textContent = t(key);
+}
 
 function networkText(value) {
   return typeof value === "string" ? value.trim().slice(0, 256) : "";
@@ -114,7 +151,7 @@ function renderNetworkLocation(subject, target, note, isServer) {
     const assembled = [...new Set(parts)].join(" · ");
     const name = location.source === "configured" ? label || assembled : assembled || label;
     target.textContent = name || t("networkLocationUnavailable");
-    if (name && location.source === "geoip" && location.approximate === true) {
+    if (name && ["geoip", "mmdb"].includes(location.source) && location.approximate === true) {
       description = t(isServer ? "networkServerApproximate" : "networkClientApproximate");
     }
   } else if (status === "internal") {
@@ -130,7 +167,7 @@ function renderNetworkLocation(subject, target, note, isServer) {
 function renderNetworkInfo() {
   if (!ui.clientIp || !ui.clientLocation || !ui.serverLocation) return;
   if (networkInfo.status !== "ready") {
-    for (const target of [ui.clientIp, ui.clientLocation, ui.serverLocation]) {
+    for (const target of [ui.clientIp, ui.clientLocation, ui.serverLocation, ui.clientIsp, ui.clientAsn, ui.serverIsp]) {
       target.textContent = t(networkInfo.status === "loading" ? "networkLoading" : "networkInfoUnavailable");
       target.dataset.status = networkInfo.status;
     }
@@ -144,6 +181,10 @@ function renderNetworkInfo() {
   ui.clientIp.title = t(client.proxied === true ? "networkForwardedIp" : "networkObservedIp");
   renderNetworkLocation(client, ui.clientLocation, ui.clientLocationNote, false);
   renderNetworkLocation(server, ui.serverLocation, ui.serverLocationNote, true);
+  ui.clientIsp.textContent = networkText(client.isp) || t("networkUnknown");
+  ui.clientAsn.textContent = typeof client.asn === "string" && /^AS\d{1,10}$/.test(client.asn) ? client.asn : t("networkUnknown");
+  const serverAsn = typeof server.asn === "string" && /^AS\d{1,10}$/.test(server.asn) ? server.asn : "";
+  ui.serverIsp.textContent = [networkText(server.isp), serverAsn].filter(Boolean).join(" · ") || t("networkUnknown");
 }
 
 async function loadNetworkInfo() {
@@ -182,18 +223,27 @@ function usesWebSocket() {
 }
 
 function syncSettings() {
-  settings.streams = Math.min(30, Math.max(1, Math.round(settings.streams)));
+  settings = normalizeSettings(settings);
   const effectiveStreams = Math.min(maxStreams(), settings.streams);
+  const latencyOnly = settings.testType === "latency";
   ui.autoMode.checked = settings.mode === "auto";
   ui.manualMode.checked = settings.mode === "manual";
   ui.streamCount.value = String(effectiveStreams);
   ui.streamCount.max = String(maxStreams());
-  ui.streamCount.disabled = running || settings.mode === "auto";
+  ui.streamCount.disabled = running || settings.mode === "auto" || latencyOnly;
   ui.settingsFields.disabled = running;
   ui.duration.value = settings.durationMs ? String(settings.durationMs) : "";
+  ui.testType.value = settings.testType;
+  ui.policy.value = settings.measurementPolicy;
+  const configuredBudget = String(settings.maxBytes);
+  const customBudget = ![...ui.budget.options].some(option => option.value === configuredBudget);
+  ui.budget.value = customBudget ? "custom" : configuredBudget;
+  ui.customBudgetRow.hidden = !customBudget;
+  if (customBudget) ui.customBudget.value = String(Math.max(1, Math.ceil(settings.maxBytes / 1024 ** 2)));
+  for (const control of [ui.autoMode, ui.manualMode, ui.duration, ui.policy, ui.budget, ui.customBudget]) control.disabled = running || latencyOnly;
   const duration = durationLabel(currentDuration());
   ui.defaultDuration.textContent = t("defaultDuration", { seconds: durationLabel(Math.max(config?.test?.downloadDurationMs || 10000, config?.test?.uploadDurationMs || 10000)) });
-  ui.settingsSummary.textContent = t("settingsSummary", { mode: settings.mode === "auto" ? t("automatic") : t("concurrencyCount", { count: effectiveStreams }), seconds: duration });
+  ui.settingsSummary.textContent = latencyOnly ? t("testLatency") : t("settingsSummary", { mode: settings.mode === "auto" ? t("automatic") : t("concurrencyCount", { count: effectiveStreams }), seconds: duration });
   if (config) ui.streamLimit.textContent = usesWebSocket()
     ? t("streamLimitWs", { count: maxStreams() })
     : t("streamLimitHttp", { count: maxStreams() });
@@ -216,14 +266,28 @@ function updateSettings(event) {
     settings.streams = Math.min(maxStreams(), Math.round(count));
   }
   settings.durationMs = ["10000", "20000", "30000"].includes(ui.duration.value) ? Number(ui.duration.value) : null;
+  settings.testType = ui.testType.value;
+  settings.measurementPolicy = ui.policy.value;
+  settings.maxBytes = ui.budget.value === "custom"
+    ? Math.min(1048576, Math.max(1, Math.round(Number(ui.customBudget.value) || 1))) * 1024 ** 2
+    : Number(ui.budget.value);
+  settings = normalizeSettings(settings);
+  if (!running && event?.target === ui.testType) {
+    displayType = settings.testType;
+    resetMetrics();
+    setStage("idle");
+    setStatus("statusIdle");
+    clearError();
+  }
   syncSettings();
   hasSavedSettings = true;
-  try { localStorage.setItem(settingsKey, JSON.stringify(settings)); } catch { /* Optional local preference storage. */ }
+  try { storage?.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* Optional local preference storage. */ }
 }
 
 function renderTransportMessage() {
   const update = transportState;
   if (!update) return;
+  if (displayType === "latency") { ui.transportMessage.hidden = true; return; }
   const unavailable = Array.isArray(update.unreachableOrigins) && update.unreachableOrigins.length > 0;
   const single = update.mode === "single-origin";
   const websocketFallback = update.reason === "websocket-unavailable";
@@ -284,6 +348,7 @@ function protocolLabel(protocols) {
 }
 
 function updateDiagnostics(update) {
+  if (!update || typeof update !== "object") return;
   lastDiagnostics = { ...lastDiagnostics, ...update };
   const active = Number.isFinite(update.activeStreams) ? update.activeStreams : update.streams;
   if (Number.isFinite(active)) {
@@ -390,6 +455,11 @@ function resetMetrics() {
   lastDiagnostics = null;
   setSpeed("download", null);
   setSpeed("upload", null);
+  delete ui.download.dataset.latencyMs;
+  renderHeroTitle();
+  if (displayType === "latency") setHeroLatency(null);
+  ui.completionNote.hidden = true;
+  ui.completionNote.textContent = "";
   [ui.streams, ui.tcp].forEach((item) => { item.textContent = "— / —"; });
   [ui.protocol, ui.rtt, ui.bdp].forEach((item) => { item.textContent = "—"; });
   for (const item of [ui.streams, ui.tcp, ui.bdp]) for (const key of Object.keys(item.dataset)) delete item.dataset[key];
@@ -437,6 +507,7 @@ function onUpdate(update) {
       ui.idle.textContent = number(update.stats.medianMs);
       ui.rtt.textContent = number(update.stats.medianMs);
       ui.jitter.textContent = number(update.stats.jitterMs);
+      if (displayType === "latency") setHeroLatency(update.stats.medianMs);
     } else {
       (update.phase === "download" ? ui.downloadLoaded : ui.uploadLoaded).textContent = number(update.stats.medianMs);
     }
@@ -473,23 +544,214 @@ function onUpdate(update) {
     const result = update.result;
     setStage("complete");
     setProgress(1);
-    setDownload(result.downloadMbps);
-    setSpeed("upload", result.uploadMbps);
+    if (result.testType === "latency") {
+      setHeroLatency(result.latency.idle.medianMs, true);
+      setSkipped("upload");
+    } else {
+      downloadComplete = true;
+      setDownload(result.downloadMbps);
+      if (result.upload) setSpeed("upload", result.uploadMbps);
+      else setSkipped("upload");
+    }
+    ui.downloadLoaded.textContent = result.download ? number(result.latency.download?.medianMs) : t("notTested");
+    ui.uploadLoaded.textContent = result.upload ? number(result.latency.upload?.medianMs) : t("notTested");
     updateDiagnostics(result.download);
     updateDiagnostics(result.upload);
     if (result.transport) updateTransport(result.transport);
-    ui.traffic.textContent = formatTraffic(result.download.totalBytes + result.upload.totalBytes);
-    const latency = Object.values(result.latency);
-    const failed = result.download.failedRequests + result.upload.failedRequests + latency.reduce((sum, item) => sum + item.failed, 0);
-    const requests = result.download.requests + result.upload.requests + latency.reduce((sum, item) => sum + item.attempts, 0);
+    ui.traffic.textContent = formatTraffic((result.download?.totalBytes || 0) + (result.upload?.totalBytes || 0));
+    const latency = Object.values(result.latency).filter(Boolean);
+    const failed = (result.download?.failedRequests || 0) + (result.upload?.failedRequests || 0) + latency.reduce((sum, item) => sum + item.failed, 0);
+    const requests = (result.download?.requests || 0) + (result.upload?.requests || 0) + latency.reduce((sum, item) => sum + item.attempts, 0);
     ui.failure.textContent = number(requests ? failed / requests * 100 : 0);
-    const noLoadedSamples = !result.latency.download.samples || !result.latency.upload.samples;
-    setStatus(failed || noLoadedSamples ? "statusPartial" : "statusComplete");
+    const noLoadedSamples = result.download && !result.latency.download?.samples || result.upload && !result.latency.upload?.samples;
+    const incomplete = result.download?.complete === false || result.upload?.complete === false;
+    setStatus(incomplete ? "resultIncomplete" : failed || noLoadedSamples ? "statusPartial" : "statusComplete");
     ui.dot.className = "connection-dot connected";
-    try {
-      localStorage.setItem("light-speed:last-result", JSON.stringify({ completedAt: result.completedAt, downloadMbps: result.downloadMbps, uploadMbps: result.uploadMbps }));
-    } catch { /* Storage may be disabled; it is optional. */ }
+    lastResult = normalizeResult(result);
+    if (lastResult) {
+      const appended = appendHistory(history, lastResult, storage);
+      history = appended.records;
+      historyStatusKey = appended.saved ? "" : "historySessionOnly";
+      renderHistory(lastResult.completedAt);
+      renderCompletionNote(lastResult);
+    }
+    if (Number.isFinite(result.downloadMbps) && Number.isFinite(result.uploadMbps)) {
+      try { storage?.setItem("light-speed:last-result", JSON.stringify({ completedAt: result.completedAt, downloadMbps: result.downloadMbps, uploadMbps: result.uploadMbps })); }
+      catch { /* Optional compatibility with the previous-results caption. */ }
+    }
   }
+}
+
+const typeLabel = type => t({ full: "testFull", download: "testDownload", latency: "testLatency" }[type] || "testFull");
+const recordSpeed = phaseResult => phaseResult == null ? t("notTested") : phaseResult.mbps == null ? t("measurementUnavailable") : formatSpeed(phaseResult.mbps);
+const recordTime = completedAt => new Intl.DateTimeFormat(getLanguage() === "zh" ? "zh-CN" : "en", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }).format(new Date(completedAt));
+
+function selectedRecord() {
+  return history.find(record => record.completedAt === ui.historySelect.value) || null;
+}
+
+function completionText(record) {
+  if (!record) return "";
+  return ["download", "upload"].flatMap(kind => {
+    const measured = record[kind];
+    if (!measured) return [];
+    const key = !measured.complete ? "completionNoMeasurement" : { stable: "completionStable", budget: "completionBudget", duration: "completionDuration" }[measured.completionReason];
+    return [t(key, { direction: t(kind === "download" ? "downloadLabel" : "uploadLabel") })];
+  }).join(" ");
+}
+
+function renderCompletionNote(record) {
+  const notable = [record?.download, record?.upload].some(measured => measured && (measured.completionReason !== "duration" || !measured.complete));
+  ui.completionNote.hidden = !notable;
+  ui.completionNote.textContent = notable ? completionText(record) : "";
+}
+
+function renderHistory(preferred) {
+  const selected = preferred || ui.historySelect.value;
+  ui.historySelect.replaceChildren();
+  if (!history.length) {
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = t("historyEmpty");
+    ui.historySelect.append(empty);
+  } else for (const record of history) {
+    const option = document.createElement("option");
+    option.value = record.completedAt;
+    option.textContent = t("historyItem", { time: recordTime(record.completedAt), type: typeLabel(record.testType) });
+    ui.historySelect.append(option);
+  }
+  if (history.some(record => record.completedAt === selected)) ui.historySelect.value = selected;
+  ui.historySelect.disabled = !history.length;
+  ui.historyClear.disabled = !history.length;
+  ui.exportHistoryCSV.disabled = !history.length;
+  renderSelectedRecord();
+}
+
+function renderSelectedRecord() {
+  const record = selectedRecord();
+  for (const control of [ui.exportJSON, ui.exportCSV, ui.exportPNG]) control.disabled = !record;
+  ui.shareResult.disabled = !record || shareBusy;
+  ui.shareRevoke.disabled = shareBusy;
+  ui.historySummary.textContent = record ? `${t("historySummary", { download: recordSpeed(record.download), upload: recordSpeed(record.upload), latency: `${number(record.latency.idle.medianMs)} ms` })} ${completionText(record)}` : "";
+  ui.historyStatus.textContent = historyStatusKey ? t(historyStatusKey) : "";
+  ui.shareStatus.textContent = shareStatusKey ? t(shareStatusKey) : "";
+}
+
+function downloadFile(blob, suffix, completedAt) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `testspeed-${completedAt ? completedAt.replace(/[:.]/g, "-") : "history"}.${suffix}`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function exportResult(format) {
+  const record = selectedRecord();
+  if (!record) return;
+  try {
+    if (format === "json") downloadFile(new Blob([resultJSON(record)], { type: "application/json" }), "json", record.completedAt);
+    else if (format === "csv") downloadFile(new Blob([resultsCSV(record)], { type: "text/csv;charset=utf-8" }), "csv", record.completedAt);
+    else {
+      const canvas = document.createElement("canvas");
+      canvas.width = 1200;
+      canvas.height = 1000;
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Canvas unavailable");
+      context.fillStyle = "#fff";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.fillStyle = "#e32529";
+      context.font = "bold 46px Arial, sans-serif";
+      context.fillText("TESTSPEED", 72, 90);
+      context.fillStyle = "#777";
+      context.font = "24px Arial, sans-serif";
+      context.fillText(`${recordTime(record.completedAt)} · ${typeLabel(record.testType)}`, 72, 145);
+      context.fillText(record.node.name.slice(0, 64), 72, 185, 1040);
+      const lines = [
+        [t("downloadLabel"), recordSpeed(record.download)], [t("uploadLabel"), recordSpeed(record.upload)],
+        [t("idleLatency"), `${number(record.latency.idle.medianMs)} ms`], [t("jitter"), `${number(record.latency.idle.jitterMs)} ms`],
+        [t("traffic"), formatTraffic((record.download?.totalBytes || 0) + (record.upload?.totalBytes || 0))],
+        [t("measurementPolicy"), t(record.measurementPolicy === "adaptive" ? "policyAdaptive" : "policyFixed")],
+      ];
+      lines.forEach(([label, value], index) => {
+        const y = 265 + index * 85;
+        context.fillStyle = "#888";
+        context.font = "25px Arial, sans-serif";
+        context.fillText(label, 72, y);
+        context.fillStyle = "#111";
+        context.font = "32px Arial, sans-serif";
+        context.fillText(value, 535, y, 585);
+      });
+      context.fillStyle = "#888";
+      context.font = "22px Arial, sans-serif";
+      ["download", "upload"].forEach((kind, index) => {
+        if (record[kind]) context.fillText(completionText({ [kind]: record[kind] }), 72, 805 + index * 40, 1040);
+      });
+      context.fillText(t("footer"), 72, 925);
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, "image/png"));
+      if (!blob) throw new Error("PNG unavailable");
+      downloadFile(blob, "png", record.completedAt);
+    }
+    historyStatusKey = "exportComplete";
+  } catch { historyStatusKey = "exportFailed"; }
+  renderSelectedRecord();
+}
+
+async function shareResult() {
+  const record = toShareRecord(selectedRecord());
+  if (!record || shareBusy || config?.features?.sharing !== true) return;
+  const token = ui.shareToken.value.trim();
+  if (config.features.shareRequiresToken === true && !token) {
+    shareStatusKey = "shareTokenNeeded";
+    renderSelectedRecord();
+    return;
+  }
+  shareBusy = true;
+  shareStatusKey = "shareSaving";
+  renderSelectedRecord();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const headers = { "Content-Type": "application/json", Accept: "application/json" };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const response = await fetch("/api/results", { method: "POST", credentials: "same-origin", cache: "no-store", headers, body: JSON.stringify(record), signal: controller.signal });
+    if (!response.ok) throw new Error("Share unavailable");
+    const data = await response.json();
+    if (!/^[a-f0-9]{32}$/.test(data.id) || !/^[a-f0-9]{32}$/.test(data.deleteToken) || data.url !== `/share.html?id=${data.id}`) throw new Error("Invalid share response");
+    activeShare = { id: data.id, deleteToken: data.deleteToken };
+    ui.shareLink.href = new URL(data.url, location.origin).href;
+    ui.shareLink.textContent = ui.shareLink.href;
+    ui.shareLink.hidden = false;
+    ui.shareRevoke.hidden = false;
+    shareStatusKey = "shareReady";
+  } catch { shareStatusKey = "shareFailed"; }
+  finally {
+    clearTimeout(timer);
+    ui.shareToken.value = "";
+    shareBusy = false;
+    renderSelectedRecord();
+  }
+}
+
+async function revokeShare() {
+  if (!activeShare || shareBusy) return;
+  shareBusy = true;
+  renderSelectedRecord();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const response = await fetch(`/api/results/${activeShare.id}`, { method: "DELETE", credentials: "same-origin", cache: "no-store", headers: { "X-Delete-Token": activeShare.deleteToken }, signal: controller.signal });
+    if (!response.ok) throw new Error("Cannot revoke share");
+    activeShare = null;
+    ui.shareLink.hidden = true;
+    ui.shareLink.removeAttribute("href");
+    ui.shareLink.textContent = "";
+    ui.shareRevoke.hidden = true;
+    shareStatusKey = "shareRevoked";
+  } catch { shareStatusKey = "shareFailed"; }
+  finally { clearTimeout(timer); shareBusy = false; renderSelectedRecord(); }
 }
 
 const speedtest = new SpeedTest({ onUpdate });
@@ -509,6 +771,9 @@ async function connect() {
     settings.streams = Math.max(1, Math.min(30, config.performance?.defaultStreams || 8));
   }
   syncSettings();
+  ui.shareTools.hidden = config.features?.sharing !== true;
+  ui.shareTokenLabel.hidden = config.features?.shareRequiresToken !== true;
+  renderHistory();
   showConfiguredTransport();
   drawChart();
 }
@@ -517,6 +782,7 @@ async function start() {
   if (running) return;
   clearError();
   updateSettings();
+  displayType = settings.testType;
   runtimeMaxStreams = null;
   transportState = null;
   ui.transportMessage.hidden = true;
@@ -535,7 +801,7 @@ async function start() {
       // A user may stop while the configuration request is in flight.
       if (!running) return;
     }
-    testOptions = { mode: settings.mode, streams: Math.min(settings.streams, configuredMaxStreams()), ...(settings.durationMs ? { durationMs: settings.durationMs } : {}) };
+    testOptions = { mode: settings.mode, streams: Math.min(settings.streams, configuredMaxStreams()), testType: settings.testType, measurementPolicy: settings.measurementPolicy, minDurationMs: 5000, maxBytes: settings.maxBytes, ...(settings.durationMs ? { durationMs: settings.durationMs } : {}) };
     chartDurationMs = currentDuration();
     ui.modeLabel.textContent = testOptions.mode === "auto" ? t("automatic") : t("manualModeLabel", { count: testOptions.streams });
     await speedtest.run(config, testOptions);
@@ -559,7 +825,7 @@ async function start() {
 }
 
 ui.start.addEventListener("click", start);
-for (const control of [ui.autoMode, ui.manualMode, ui.streamCount, ui.duration]) control.addEventListener("change", updateSettings);
+for (const control of [ui.autoMode, ui.manualMode, ui.streamCount, ui.duration, ui.testType, ui.policy, ui.budget, ui.customBudget]) control.addEventListener("change", updateSettings);
 ui.stop.addEventListener("click", () => {
   connectionController?.abort(new DOMException(t("stopped"), "AbortError"));
   if (speedtest.controller) speedtest.cancel();
@@ -587,7 +853,7 @@ document.addEventListener("visibilitychange", () => {
 });
 
 try {
-  const previous = JSON.parse(localStorage.getItem("light-speed:last-result"));
+  const previous = JSON.parse(storage?.getItem("light-speed:last-result") || "null");
   if (previous && Number.isFinite(previous.downloadMbps) && Number.isFinite(previous.uploadMbps) && !Number.isNaN(Date.parse(previous.completedAt))) {
     previousResult = previous;
     ui.previous.hidden = false;
@@ -608,7 +874,17 @@ function renderLanguage() {
   ui.start.setAttribute("aria-label", t(hasRun ? "retest" : "start"));
   ui.stop.setAttribute("aria-label", t("stop"));
   ui.phase.textContent = t(`phase${phase[0].toUpperCase()}${phase.slice(1)}`);
-  ui.downloadUnitDescription.textContent = t(ui.downloadUnit.textContent === "Gbps" ? "unitGbpsDescription" : "unitMbpsDescription");
+  renderHeroTitle();
+  ui.downloadUnitDescription.textContent = t(displayType === "latency" ? "unitMsDescription" : ui.downloadUnit.textContent === "Gbps" ? "unitGbpsDescription" : "unitMbpsDescription");
+  if (displayType === "latency") ui.downloadUnit.textContent = "ms";
+  if (ui.upload.dataset.skipped === "true") setSkipped("upload");
+  if (phase === "complete" && lastResult) {
+    if (lastResult.testType === "latency") setHeroLatency(lastResult.latency.idle.medianMs, true);
+    if (!lastResult.upload) setSkipped("upload");
+    if (!lastResult.download) ui.downloadLoaded.textContent = t("notTested");
+    if (!lastResult.upload) ui.uploadLoaded.textContent = t("notTested");
+    renderCompletionNote(lastResult);
+  }
   if (statusState.key === "statusTransfer") statusState.params.direction = t(phase === "download" ? "downloadLabel" : "uploadLabel");
   ui.status.textContent = t(statusState.key, statusState.params);
   if (config) ui.node.textContent = config.nodes[0].name === "默认测速节点" ? t("defaultNode") : config.nodes[0].name;
@@ -624,6 +900,7 @@ function renderLanguage() {
   drawChart();
   renderPrevious();
   renderNetworkInfo();
+  renderHistory();
 }
 
 ui.moreButton.addEventListener("click", () => {
@@ -633,9 +910,31 @@ ui.moreButton.addEventListener("click", () => {
 });
 ui.language.addEventListener("change", () => setLanguage(ui.language.value));
 onLanguageChange(renderLanguage);
+ui.historySelect.addEventListener("change", renderSelectedRecord);
+ui.historyClear.addEventListener("click", () => {
+  const cleared = clearHistory(storage);
+  history = [];
+  lastResult = null;
+  previousResult = null;
+  ui.previous.hidden = true;
+  historyStatusKey = cleared ? "historyCleared" : "historyClearUnavailable";
+  renderHistory();
+});
+ui.exportJSON.addEventListener("click", () => { void exportResult("json"); });
+ui.exportCSV.addEventListener("click", () => { void exportResult("csv"); });
+ui.exportPNG.addEventListener("click", () => { void exportResult("png"); });
+ui.exportHistoryCSV.addEventListener("click", () => {
+  if (!history.length) return;
+  try { downloadFile(new Blob([resultsCSV(history)], { type: "text/csv;charset=utf-8" }), "csv"); historyStatusKey = "exportComplete"; }
+  catch { historyStatusKey = "exportFailed"; }
+  renderSelectedRecord();
+});
+ui.shareResult.addEventListener("click", () => { void shareResult(); });
+ui.shareRevoke.addEventListener("click", () => { void revokeShare(); });
 
 setSpeed("download", null);
 setSpeed("upload", null);
+if (displayType === "latency") setHeroLatency(null);
 renderLanguage();
 void loadNetworkInfo();
 connect().then(() => {

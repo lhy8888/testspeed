@@ -11,10 +11,12 @@ RUN --mount=type=secret,id=proxy_ca \
     fi
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/testspeed .
+RUN mkdir -p /out/state/testspeed && chown 65532:65532 /out/state/testspeed && chmod 0750 /out/state/testspeed
 
 FROM scratch
-COPY --from=build /out/testspeed /testspeed
+COPY --from=build --chmod=0755 /out/testspeed /testspeed
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /out/state/ /var/lib/
 USER 65532:65532
 EXPOSE 8080
 ENTRYPOINT ["/testspeed"]

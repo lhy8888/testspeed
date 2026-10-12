@@ -72,7 +72,27 @@ export function normalizeOptions(config, options = {}) {
   if (!Number.isInteger(streams) || streams < 1 || streams > config.performance.maxStreams) throw new Error(`当前部署支持 1 至 ${config.performance.maxStreams} 条并行传输。`);
   if (options.durationMs !== undefined && (!Number.isInteger(options.durationMs) || options.durationMs < 10000 || options.durationMs > 60000)) throw new Error("测量时间应为 10 至 60 秒。");
   if (options.warmupOverride !== undefined && (!Number.isFinite(options.warmupOverride) || options.warmupOverride < 0 || options.warmupOverride > 10000)) throw new Error("预热时间应为 0 至 10 秒。");
-  return { mode, streams, durationMs: options.durationMs, warmupOverride: options.warmupOverride };
+  const testType = options.testType ?? "full";
+  const measurementPolicy = options.measurementPolicy ?? "fixed";
+  const minDurationMs = options.minDurationMs ?? 5000;
+  const maxBytes = options.maxBytes ?? 0;
+  if (!["full", "download", "latency"].includes(testType)) throw new Error("请选择完整、下载或延迟测试。");
+  if (!["fixed", "adaptive"].includes(measurementPolicy)) throw new Error("请选择固定或稳定后结束的测量策略。");
+  if (!Number.isInteger(minDurationMs) || minDurationMs < 5000 || minDurationMs > (options.durationMs ?? 60000)) throw new Error("最短测量时间应为 5 秒至最大测量时间。");
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0 || maxBytes > 1024 ** 4) throw new Error("单方向流量预算应为 0 至 1 TiB 的整数，0 表示不限。");
+  return { mode, streams, durationMs: options.durationMs, warmupOverride: options.warmupOverride, testType, measurementPolicy, minDurationMs, maxBytes };
+}
+
+export function isThroughputStable(windows) {
+  const recent = windows.slice(-3);
+  if (recent.length < 3 || recent.some((window) => !(window.elapsedMs >= 1000) || !(window.mbps > 0))) return false;
+  const rates = recent.map((window) => window.mbps);
+  const mean = rates.reduce((sum, rate) => sum + rate, 0) / rates.length;
+  const variation = Math.sqrt(rates.reduce((sum, rate) => sum + (rate - mean) ** 2, 0) / rates.length) / mean;
+  const dropped = rates.some((rate, index) => index > 0 && rate < rates[index - 1] * 0.9);
+  // Reject a continuing ramp even when three close samples have a low CV.
+  const drift = Math.abs(rates.at(-1) - rates[0]) / rates[0];
+  return variation <= 0.05 && !dropped && drift <= 0.05;
 }
 
 export function toMbps(bytes, elapsedMs) { return elapsedMs > 0 ? bytes * 8 / elapsedMs / 1000 : 0; }
@@ -152,7 +172,7 @@ class TransferState {
     this.kind = kind;
     this.node = node;
     this.performance = performanceConfig;
-    this.options = options;
+    this.options = { measurementPolicy: "fixed", minDurationMs: 5000, maxBytes: 0, ...options };
     this.rttMs = idle.medianMs || 0;
     this.warmupMs = Math.min(10000, Math.ceil(Math.max(options.warmupOverride ?? test.warmupMs, 8 * this.rttMs)));
     this.durationMs = options.durationMs ?? (kind === "download" ? test.downloadDurationMs : test.uploadDurationMs);
@@ -179,6 +199,10 @@ class TransferState {
     this.cancelledRequests = 0;
     this.exhaustedJobs = 0;
     this.windowFinished = false;
+    this.completionReason = null;
+    this.stabilityWindows = [];
+    this.stabilityTime = 0;
+    this.stabilityBytes = 0;
     this.latencies = [];
     this.failedPings = 0;
     this.points = [];
@@ -196,7 +220,52 @@ class TransferState {
   }
 
   emitPhase() {
-    this.engine.emit({ type: "phase", phase: this.kind, transport: this.performance.transport || "http", durationMs: this.durationMs, warmupMs: this.warmupMs, rttMs: this.rttMs, requestedStreams: this.target });
+    this.engine.emit({ type: "phase", phase: this.kind, transport: this.performance.transport || "http", durationMs: this.durationMs, warmupMs: this.warmupMs, rttMs: this.rttMs, requestedStreams: this.target, measurementPolicy: this.options.measurementPolicy, maxBytes: this.options.maxBytes });
+  }
+
+  captureDownload(bytes, now) {
+    this.totalBytes += bytes;
+    if (now >= this.measurementStart && now <= this.ends) this.measuredBytes += bytes;
+    this.emitPreview(now);
+    if (this.options.maxBytes && this.totalBytes >= this.options.maxBytes) this.finishDownload("budget", now);
+  }
+
+  finishDownload(reason, now = this.engine.clock()) {
+    if (this.windowFinished || this.controller.signal.aborted) return;
+    this.elapsedMs = Math.max(0, Math.min(this.durationMs, now - this.measurementStart));
+    this.completionReason = reason;
+    this.windowFinished = true;
+    this.controller.abort(abortError("测量窗口完成"));
+  }
+
+  recordStability() {
+    const elapsed = this.elapsedMs - this.stabilityTime;
+    if (elapsed < 1000) return;
+    this.stabilityWindows.push({ elapsedMs: elapsed, mbps: toMbps(this.measuredBytes - this.stabilityBytes, elapsed) });
+    if (this.stabilityWindows.length > 6) this.stabilityWindows.shift();
+    this.stabilityTime = this.elapsedMs;
+    this.stabilityBytes = this.measuredBytes;
+  }
+
+  shouldFinishStable() {
+    return this.options.measurementPolicy === "adaptive" && this.elapsedMs < this.durationMs
+      && this.elapsedMs >= Math.max(5000, this.options.minDurationMs, 8 * this.rttMs)
+      && this.failedRequests === 0 && this.failedPings === 0 && this.lagTicks === 0
+      && (this.options.mode !== "auto" || this.converged)
+      && isThroughputStable(this.stabilityWindows);
+  }
+
+  applyUploadSnapshot(snapshot) {
+    if (!snapshot || !Number.isSafeInteger(snapshot.measuredBytes) || !Number.isSafeInteger(snapshot.totalBytes) || !Number.isFinite(snapshot.measurementElapsedMs)
+      || snapshot.measuredBytes < this.measuredBytes || snapshot.totalBytes < this.totalBytes || snapshot.totalBytes < snapshot.measuredBytes
+      || snapshot.measurementElapsedMs < this.elapsedMs || snapshot.measurementElapsedMs > this.durationMs + 1
+      || (snapshot.finished && snapshot.completionReason !== undefined && !["duration", "stable", "budget"].includes(snapshot.completionReason))) throw new Error("上传测速进度无效，请更新服务后重试。");
+    this.measuredBytes = snapshot.measuredBytes;
+    this.totalBytes = snapshot.totalBytes;
+    this.elapsedMs = snapshot.measurementElapsedMs;
+    this.serverStats = snapshot;
+    this.recordStability();
+    if (snapshot.finished) this.completionReason = ["duration", "stable", "budget"].includes(snapshot.completionReason) ? snapshot.completionReason : "duration";
   }
 
   captureHeaders(response) {
@@ -271,7 +340,7 @@ class TransferState {
     if (now - this.lastTick > 450) this.lagTicks += 1;
     else this.lagTicks = Math.max(0, this.lagTicks - 1);
     this.lastTick = now;
-    if (this.kind === "download") this.elapsedMs = Math.max(0, Math.min(this.durationMs, now - this.measurementStart));
+    if (this.kind === "download" && !this.windowFinished) this.elapsedMs = Math.max(0, Math.min(this.durationMs, now - this.measurementStart));
     const interval = this.elapsedMs - this.lastPointTime;
     const rate = interval > 0 ? toMbps(this.measuredBytes - this.lastPointBytes, interval) : 0;
     if (interval > 0) {
@@ -280,6 +349,8 @@ class TransferState {
       this.lastPointTime = this.elapsedMs;
     }
     this.adapt(now, launch);
+    this.recordStability();
+    if (this.kind === "download" && this.shouldFinishStable()) this.finishDownload("stable", now);
     this.emitProgress(now, rate);
   }
 
@@ -315,9 +386,13 @@ class TransferState {
   }
 
   result() {
-    if (!this.measuredBytes) throw new Error(`${this.kind === "download" ? "下载" : "上传"}测速没有收到有效数据，请检查连接后重试。`);
+    const incomplete = this.completionReason === "budget" && (!this.measuredBytes || this.elapsedMs <= 0);
+    if ((!this.measuredBytes || this.elapsedMs <= 0) && !incomplete) throw new Error(`${this.kind === "download" ? "下载" : "上传"}测速没有收到有效数据，请检查连接后重试。`);
     return {
-      mbps: toMbps(this.measuredBytes, this.elapsedMs), measuredBytes: this.measuredBytes, totalBytes: this.totalBytes,
+      mbps: incomplete ? null : toMbps(this.measuredBytes, this.elapsedMs), measuredBytes: this.measuredBytes, totalBytes: this.totalBytes,
+      complete: !incomplete, incompleteReason: incomplete ? "budget-before-measurement" : null,
+      completionReason: this.completionReason || "duration", measurementPolicy: this.options.measurementPolicy,
+      maxBytes: this.options.maxBytes, budgetOvershootBytes: this.options.maxBytes ? Math.max(0, this.totalBytes - this.options.maxBytes) : 0,
       durationMs: this.elapsedMs, requests: this.requests - this.cancelledRequests, attemptedRequests: this.requests,
       failedRequests: this.failedRequests, latency: latencyStatistics(this.latencies, this.failedPings), points: this.points,
       ...this.metadata(),
@@ -567,6 +642,43 @@ export class MeasurementEngine {
     state.peakStreams = Math.max(state.peakStreams, [...state.jobs.values()].filter((item) => item.open).length);
   }
 
+  async checkUploadCompletion(state, session, snapshot, timeoutMs) {
+    state.applyUploadSnapshot(snapshot);
+    if (!snapshot.finished && state.shouldFinishStable()) {
+      // Only the server can freeze its actual received-byte window. Never
+      // replace server counts with bytes accepted by socket.send()/fetch().
+      state.requests += 1;
+      try {
+        const frozen = await this.json(this.url(state.node.baseUrl, `upload-sessions/${encodeURIComponent(session.id)}/finish`), {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason: "stable" }),
+        }, state.controller.signal, timeoutMs);
+        state.applyUploadSnapshot(frozen);
+        // A byte/time limit can win between the poll and this POST; report
+        // that authoritative reason rather than pretending stability won.
+        if (!frozen.finished) throw new Error("上传测量窗口未完成，请检查服务后重试。");
+        snapshot = frozen;
+      } catch (error) { if (!state.controller.signal.aborted) state.failedRequests += 1; throw error; }
+    }
+    return snapshot.finished;
+  }
+
+  async settleHTTPDownloadConnections(node, run, signal) {
+    // A reverse proxy can observe browser cancellation before its upstream
+    // Go request closes. Verify actual release instead of replacing a stale
+    // positive count with an invented zero. This diagnostic never changes
+    // transfer bytes, elapsed time, or a recorded transfer failure.
+    const deadline = this.clock() + 1000;
+    let snapshot = null;
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      const remainingMs = deadline - this.clock();
+      if (remainingMs <= 0) break;
+      snapshot = await this.json(this.url(node.baseUrl, "connection-stats", { run }), {}, signal, remainingMs);
+      if (!(snapshot?.activeTcpConnections > 0) && !(snapshot?.activeRequests > 0)) return snapshot;
+      if (attempt < 5) await pause(Math.min(180, Math.max(0, deadline - this.clock())), signal);
+    }
+    return snapshot;
+  }
+
   async websocketDownloadPhase(node, test, performanceConfig, options, idle, globalSignal) {
     const state = new TransferState(this, "download", node, test, performanceConfig, options, idle, globalSignal);
     const random = new Uint8Array(12);
@@ -587,9 +699,7 @@ export class MeasurementEngine {
             onBinary: (socket, bytes) => {
               const now = this.clock();
               job.received ||= bytes > 0;
-              state.totalBytes += bytes;
-              if (now >= state.measurementStart && now <= state.ends) state.measuredBytes += bytes;
-              state.emitPreview(now);
+              state.captureDownload(bytes, now);
               feedbackBytes += bytes;
               failures = 0;
               if (now < state.ends && (first || now - feedbackTime >= 250)) {
@@ -625,7 +735,8 @@ export class MeasurementEngine {
     const ticker = setInterval(() => state.tick(launch), 200);
     let result = null;
     try {
-      await pause(state.warmupMs + state.durationMs, state.controller.signal);
+      await pause(state.warmupMs + state.durationMs, state.controller.signal).catch((error) => { if (!state.windowFinished || globalSignal.aborted) throw error; });
+      if (globalSignal.aborted) throw globalSignal.reason || abortError();
       state.tick(launch);
       result = state.result();
       this.emit({ type: "phase-complete", phase: "download", result });
@@ -680,11 +791,11 @@ export class MeasurementEngine {
     };
     try {
       session = await this.json(this.url(node.baseUrl, "upload-sessions"), {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ warmupMs: state.warmupMs, durationMs: state.durationMs }),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ warmupMs: state.warmupMs, durationMs: state.durationMs, maxBytes: state.options.maxBytes }),
       }, state.controller.signal, timeoutMs);
       if (!session || typeof session.id !== "string") throw new Error("上传测速会话无效，请更新服务后重试。");
       this.emit({ type: "session-created", id: session.id, baseUrl: node.baseUrl });
-      const base = this.createRandomBlob(performanceConfig.uploadBlockBytes);
+      const base = this.createRandomBlob(state.options.maxBytes ? Math.min(performanceConfig.uploadBlockBytes, state.options.maxBytes) : performanceConfig.uploadBlockBytes);
       for (let offset = 0; offset < base.size; offset += MIB) payloads.push(base.slice(offset, Math.min(offset + MIB, base.size)));
       state.began = this.clock();
       state.lastProbeTime = state.began;
@@ -699,7 +810,7 @@ export class MeasurementEngine {
             if (!job.open || job.controller.signal.aborted || socket?.readyState !== 1) continue;
             for (let sent = 0; sent < 4; sent += 1) {
               const payload = payloads[job.payloadIndex % payloads.length];
-              if (socket.bufferedAmount + payload.size > 4 * MIB) break;
+              if (socket.bufferedAmount + payload.size > Math.min(4 * MIB, state.options.maxBytes || 4 * MIB)) break;
               try { socket.send(payload); job.payloadIndex += 1; sentAny = true; }
               catch { try { socket.close(); } catch {} break; }
             }
@@ -724,12 +835,7 @@ export class MeasurementEngine {
           await pause(300, state.controller.signal);
           continue;
         }
-        if (!snapshot || !Number.isFinite(snapshot.measuredBytes) || !Number.isFinite(snapshot.totalBytes) || !Number.isFinite(snapshot.measurementElapsedMs) || snapshot.measuredBytes < 0 || snapshot.measurementElapsedMs < 0 || snapshot.measurementElapsedMs > state.durationMs + 1) throw new Error("上传测速进度无效，请更新服务后重试。");
-        state.measuredBytes = snapshot.measuredBytes;
-        state.totalBytes = snapshot.totalBytes;
-        state.elapsedMs = snapshot.measurementElapsedMs;
-        state.serverStats = snapshot;
-        if (snapshot.finished) {
+        if (await this.checkUploadCompletion(state, session, snapshot, timeoutMs)) {
           state.windowFinished = true;
           state.tick(launch);
           result = state.result();
@@ -785,9 +891,7 @@ export class MeasurementEngine {
               if (done) throw new Error("连续下载连接提前结束");
               const now = this.clock();
               job.received = value.byteLength > 0 || job.received;
-              state.totalBytes += value.byteLength;
-              if (now >= state.measurementStart && now <= state.ends) state.measuredBytes += value.byteLength;
-              state.emitPreview(now);
+              state.captureDownload(value.byteLength, now);
               failures = 0;
               // A continuously ready reader must still let timers and cancellation messages run.
               if (this.yielding || now - this.lastTaskYield >= 8) await this.yieldReaders();
@@ -821,7 +925,8 @@ export class MeasurementEngine {
     const ticker = setInterval(() => state.tick(launch), 200);
     let result = null;
     try {
-      await pause(state.warmupMs + state.durationMs, state.controller.signal);
+      await pause(state.warmupMs + state.durationMs, state.controller.signal).catch((error) => { if (!state.windowFinished || globalSignal.aborted) throw error; });
+      if (globalSignal.aborted) throw globalSignal.reason || abortError();
       state.tick(launch);
       result = state.result();
       this.emit({ type: "phase-complete", phase: "download", result });
@@ -832,7 +937,7 @@ export class MeasurementEngine {
       await Promise.allSettled([latencyJob, statsJob]);
       if (result) {
         try {
-          state.serverStats = await this.json(this.url(node.baseUrl, "connection-stats", { run }), {}, globalSignal, Math.max(1500, 3 * state.rttMs));
+          state.serverStats = await this.settleHTTPDownloadConnections(node, run, globalSignal);
           Object.assign(result, state.metadata());
         } catch { result.connections.active = null; }
         result.activeStreams = 0;
@@ -888,12 +993,12 @@ export class MeasurementEngine {
     };
     try {
       session = await this.json(this.url(node.baseUrl, "upload-sessions"), {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ warmupMs: state.warmupMs, durationMs: state.durationMs }),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ warmupMs: state.warmupMs, durationMs: state.durationMs, maxBytes: state.options.maxBytes }),
       }, state.controller.signal, timeoutMs);
       if (!session || typeof session.id !== "string") throw new Error("上传测速会话无效，请更新服务后重试。");
       this.emit({ type: "session-created", id: session.id, baseUrl: node.baseUrl });
-      const baseBlob = this.createRandomBlob(performanceConfig.uploadBlockBytes);
-      uploadBody = createUploadBody(baseBlob, performanceConfig.maxUploadBodyBytes);
+      const baseBlob = this.createRandomBlob(state.options.maxBytes ? Math.min(performanceConfig.uploadBlockBytes, state.options.maxBytes) : performanceConfig.uploadBlockBytes);
+      uploadBody = createUploadBody(baseBlob, Math.min(performanceConfig.maxUploadBodyBytes, state.options.maxBytes || performanceConfig.maxUploadBodyBytes));
       state.began = this.clock();
       state.lastProbeTime = state.began;
       state.emitPhase();
@@ -916,12 +1021,7 @@ export class MeasurementEngine {
           await pause(300, state.controller.signal);
           continue;
         }
-        if (!snapshot || !Number.isFinite(snapshot.measuredBytes) || !Number.isFinite(snapshot.totalBytes) || !Number.isFinite(snapshot.measurementElapsedMs) || snapshot.measuredBytes < 0 || snapshot.measurementElapsedMs < 0 || snapshot.measurementElapsedMs > state.durationMs + 1) throw new Error("上传测速进度无效，请更新服务后重试。");
-        state.measuredBytes = snapshot.measuredBytes;
-        state.totalBytes = snapshot.totalBytes;
-        state.elapsedMs = snapshot.measurementElapsedMs;
-        state.serverStats = snapshot;
-        if (snapshot.finished) {
+        if (await this.checkUploadCompletion(state, session, snapshot, timeoutMs)) {
           state.windowFinished = true;
           state.tick(launch);
           result = state.result();
@@ -959,6 +1059,17 @@ export class MeasurementEngine {
     this.controller = controller;
     try {
       const startedAt = new Date().toISOString();
+      if (options.testType === "latency") {
+        const idle = await this.idleLatency(node, normalized.test.pingSamples, controller.signal);
+        ensureActive(controller.signal);
+        const result = {
+          schemaVersion: 1, testType: options.testType, measurementPolicy: options.measurementPolicy, maxBytes: options.maxBytes,
+          startedAt, completedAt: new Date().toISOString(), node, mode: options.mode, transport: null,
+          downloadMbps: null, uploadMbps: null, latency: { idle, download: null, upload: null }, download: null, upload: null,
+        };
+        this.emit({ type: "complete", result });
+        return result;
+      }
       // One successful unloaded request is sufficient to choose RTT-aware
       // transport and warm-up budgets. Keep all failures and finish the same
       // total idle-probe budget only after both transfer phases clean up.
@@ -969,15 +1080,16 @@ export class MeasurementEngine {
       const effectiveNode = effective.nodes[0];
       const download = await this.downloadPhase(effectiveNode, effective.test, effective.performance, prepared.options, initialIdle, controller.signal);
       if (controller.signal.aborted) throw controller.signal.reason || abortError();
-      const upload = await this.uploadPhase(effectiveNode, effective.test, effective.performance, prepared.options, initialIdle, controller.signal);
+      const upload = options.testType === "full" ? await this.uploadPhase(effectiveNode, effective.test, effective.performance, prepared.options, initialIdle, controller.signal) : null;
       if (controller.signal.aborted) throw controller.signal.reason || abortError();
       const idle = await this.idleLatency(effectiveNode, normalized.test.pingSamples, controller.signal, {
         seedValues: [initialIdle.medianMs], seedFailed: initialIdle.failed || 0, announce: false,
       });
       if (controller.signal.aborted) throw controller.signal.reason || abortError();
       const result = {
+        schemaVersion: 1, testType: options.testType, measurementPolicy: options.measurementPolicy, maxBytes: options.maxBytes,
         startedAt, completedAt: new Date().toISOString(), node: effectiveNode, mode: options.mode, transport: prepared.transport,
-        downloadMbps: download.mbps, uploadMbps: upload.mbps, latency: { idle, download: download.latency, upload: upload.latency }, download, upload,
+        downloadMbps: download.mbps, uploadMbps: upload?.mbps ?? null, latency: { idle, download: download.latency, upload: upload?.latency ?? null }, download, upload,
       };
       this.emit({ type: "complete", result });
       return result;

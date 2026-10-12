@@ -65,6 +65,9 @@
             <div><span data-i18n="clientIp">客户端 IP</span><strong id="client-ip">—</strong></div>
             <div><span data-i18n="clientLocation">客户端位置</span><strong id="client-location">—</strong><small id="client-location-note"></small></div>
             <div><span data-i18n="serverLocation">服务器位置</span><strong id="server-location">—</strong><small id="server-location-note"></small></div>
+            <div><span data-i18n="clientIsp">网络运营方</span><strong id="client-isp">—</strong></div>
+            <div><span data-i18n="clientAsn">自治系统 ASN</span><strong id="client-asn">—</strong></div>
+            <div><span data-i18n="serverIsp">服务器网络</span><strong id="server-isp">—</strong></div>
           </div>
         </div>
 
@@ -100,13 +103,32 @@
         <details id="test-settings" class="settings-panel">
           <summary><span data-i18n="testSettings">测速设置</span><span class="settings-summary"><span id="settings-summary">8 路并发 · 10 秒 / 阶段</span><svg class="icon settings-chevron" aria-hidden="true"><use href="#icon-chevron"/></svg></span></summary>
           <fieldset id="settings-fields" class="settings-fields"><legend class="visually-hidden" data-i18n="testSettings">测速设置</legend>
+            <div class="settings-row"><div class="setting-label"><label for="test-type" data-i18n="testType">测试项目</label><p data-i18n="testTypeHelp">仅下载不进行上传；仅延迟不传输测速数据。</p></div><select id="test-type"><option value="full" data-i18n="testFull">完整测速</option><option value="download" data-i18n="testDownload">仅下载</option><option value="latency" data-i18n="testLatency">仅延迟</option></select></div>
             <div class="settings-row mode-setting"><div class="setting-label"><span data-i18n="concurrencyMode">并发方式</span><p data-i18n="concurrencyHelp">默认 8 路，可按 RTT 和吞吐自动调整。</p></div><div class="mode-control" role="group" aria-label="并发方式" data-i18n-aria-label="concurrencyMode"><label><input id="mode-manual" name="stream-mode" type="radio" value="manual" checked><span><span data-i18n="manual">手动指定</span><small data-i18n="defaultTag">默认</small></span></label><label><input id="mode-auto" name="stream-mode" type="radio" value="auto"><span data-i18n="automatic">自动适配</span></label></div></div>
             <div class="settings-row"><div class="setting-label"><label id="stream-count-label" for="stream-count">并发连接数</label><p id="stream-limit">单端口支持最多 30 路</p></div><input id="stream-count" type="number" min="1" max="30" step="1" value="8" inputmode="numeric" aria-describedby="stream-limit stream-explanation"></div>
             <div class="settings-row"><div class="setting-label"><label for="measurement-duration" data-i18n="measurementTime">测量时间</label><p data-i18n="measurementHelp">每个方向单独计时，预热不计入结果。</p></div><select id="measurement-duration"><option id="default-duration" value="">节点默认 · 10 秒</option><option value="10000" data-i18n="durationOption" data-i18n-vars='{"seconds":10}'>10 秒 / 阶段</option><option value="20000" data-i18n="durationOption" data-i18n-vars='{"seconds":20}'>20 秒 / 阶段</option><option value="30000" data-i18n="durationOption" data-i18n-vars='{"seconds":30}'>30 秒 / 阶段</option></select></div>
+            <div class="settings-row"><div class="setting-label"><label for="measurement-policy" data-i18n="measurementPolicy">测量策略</label><p data-i18n="adaptiveHelp">自适应至少测量 5 秒，吞吐稳定后提前结束；延迟较高时延长观察。</p></div><select id="measurement-policy"><option value="fixed" data-i18n="policyFixed">固定时间</option><option value="adaptive" data-i18n="policyAdaptive">稳定后结束</option></select></div>
+            <div class="settings-row"><div class="setting-label"><label for="traffic-budget" data-i18n="trafficBudget">每方向流量预算</label><p data-i18n="trafficBudgetHelp">包含预热，达到预算停止。并发在途数据可能小幅超出，结果记录实际流量。</p></div><select id="traffic-budget"><option value="0" data-i18n="budgetUnlimited">不限流量</option><option value="1073741824">1 GiB</option><option value="5368709120">5 GiB</option><option value="21474836480">20 GiB</option><option value="custom" data-i18n="budgetCustom">自定义</option></select></div>
+            <div id="custom-budget-row" class="settings-row" hidden><div class="setting-label"><label for="custom-budget-mib" data-i18n="customBudgetMiB">自定义预算（MiB）</label><p data-i18n="customBudgetHelp">1–1,048,576 MiB，每个方向单独限制；1,024 MiB = 1 GiB。</p></div><input id="custom-budget-mib" type="number" min="1" max="1048576" step="1" value="64" inputmode="numeric"></div>
           </fieldset>
           <p id="stream-explanation" class="settings-caption">每路 WebSocket 使用独立连接。</p>
         </details>
         <p class="test-note" data-i18n="privacyNote">高速测速会使用大量流量。可测上限取决于浏览器、CPU、网卡与测速服务。</p>
+        <p id="completion-note" class="metrics-caption completion-note" role="status" hidden></p>
+        <section class="result-tools" aria-labelledby="result-tools-title">
+          <div class="details-heading"><h2 id="result-tools-title" data-i18n="resultsTools">结果与工具</h2><a class="subtle-link" href="/stability.html" data-i18n="stabilityTest">连接稳定性测试</a></div>
+          <p class="metrics-caption" data-i18n="localHistoryHelp">最近 50 条结果仅保存在当前浏览器，不会自动上传。导出内容不包含 IP 或所在地。</p>
+          <div class="history-picker"><label for="history-select" data-i18n="localHistory">本地历史</label><select id="history-select" disabled><option value="" data-i18n="historyEmpty">暂无已完成测速</option></select><button id="history-clear" class="text-button" type="button" disabled data-i18n="clearHistory">清空</button></div>
+          <p id="history-summary" class="metrics-caption"></p>
+          <div class="export-actions"><button id="export-json" type="button" disabled>JSON</button><button id="export-csv" type="button" disabled>CSV</button><button id="export-png" type="button" disabled>PNG</button><button id="export-history-csv" type="button" disabled data-i18n="exportHistory">导出历史 CSV</button></div>
+          <p id="history-status" class="metrics-caption" role="status"></p>
+          <div id="share-tools" class="share-tools" hidden>
+            <p class="metrics-caption" data-i18n="shareHelp">点击后才将选中的测速结果保存到当前服务器并生成分享链接，不包含客户端 IP。</p>
+            <label id="share-token-label" class="share-token-label" hidden><span data-i18n="shareToken">分享授权令牌</span><input id="share-token" type="password" maxlength="512" autocomplete="off" spellcheck="false" data-i18n-placeholder="shareTokenPlaceholder" placeholder="本次使用，不保存"></label>
+            <div class="export-actions"><button id="share-result" type="button" disabled data-i18n="shareResult">生成分享链接</button><button id="share-revoke" type="button" hidden data-i18n="revokeShare">撤销本次分享</button></div>
+            <p id="share-status" class="metrics-caption" role="status"></p><a id="share-link" class="subtle-link share-link" target="_blank" rel="noopener" hidden></a>
+          </div>
+        </section>
         <p id="previous-result" class="previous-result" hidden></p>
       </section>
       <noscript><p class="error-message">请启用 JavaScript / Please enable JavaScript.</p></noscript>

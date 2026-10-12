@@ -21,6 +21,8 @@ manager="$application_directory/manage.sh"
 version_file="$application_directory/VERSION"
 configuration="$configuration_directory/testspeed.env"
 unit="$test_root/etc/systemd/system/testspeed.service"
+share_unit_directory="$test_root/etc/systemd/system/testspeed.service.d"
+share_unit="$share_unit_directory/90-testspeed-share.conf"
 systemctl_command=${TESTSPEED_SYSTEMCTL:-systemctl}
 curl_command=${TESTSPEED_CURL:-curl}
 stage=''
@@ -38,7 +40,15 @@ managed_path() {
     version) printf '%s' "$version_file" ;;
     configuration) printf '%s' "$configuration" ;;
     unit) printf '%s' "$unit" ;;
+    share_unit) printf '%s' "$share_unit" ;;
   esac
+}
+
+share_unit_is_managed() {
+  local first_line=''
+  [[ -f "$share_unit" && ! -L "$share_unit" ]] || return 1
+  IFS= read -r first_line < "$share_unit" || return 1
+  [[ "$first_line" == '# Managed by testspeed manage.sh share on.' ]]
 }
 
 atomic_file() {
@@ -52,8 +62,12 @@ atomic_file() {
 backup_installation() {
   local name path
   mkdir -p "$stage/backup"
-  for name in binary manager version configuration unit; do
+  for name in binary manager version configuration unit share_unit; do
     path=$(managed_path "$name")
+    if [[ "$name" == share_unit && ( -e "$path" || -L "$path" ) ]] && ! share_unit_is_managed; then
+      touch "$stage/backup/share_unit.unmanaged"
+      continue
+    fi
     if [[ -e "$path" ]]; then cp -p -- "$path" "$stage/backup/$name"; fi
   done
   if "$systemctl_command" is-active --quiet testspeed.service; then was_active=1; fi
@@ -66,14 +80,17 @@ rollback_installation() {
   printf 'Installation failed; restoring the previous files and service state\n' >&2
   "$systemctl_command" stop testspeed.service >/dev/null 2>&1 || true
   if (( ! was_enabled )); then "$systemctl_command" disable testspeed.service >/dev/null 2>&1 || true; fi
-  for name in binary manager version configuration unit; do
+  for name in binary manager version configuration unit share_unit; do
+    if [[ "$name" == share_unit && -f "$stage/backup/share_unit.unmanaged" ]]; then continue; fi
     path=$(managed_path "$name")
     if [[ -f "$stage/backup/$name" ]]; then
+      if [[ "$name" == share_unit ]]; then install -d -m 0755 -- "$share_unit_directory" || failed=1; fi
       atomic_file "$stage/backup/$name" "$path" "$(stat -c '%a' "$stage/backup/$name")" || failed=1
     else
       rm -f -- "$path" || failed=1
     fi
   done
+  rmdir -- "$share_unit_directory" 2>/dev/null || true
   "$systemctl_command" daemon-reload || failed=1
   if (( was_enabled )); then "$systemctl_command" enable testspeed.service >/dev/null || failed=1; fi
   if (( was_active )); then "$systemctl_command" restart testspeed.service || failed=1; fi
@@ -238,19 +255,63 @@ set_mode() {
   printf 'Transport: %s; maximum streams: %s. Existing ADDR/TLS settings preserved.\n' "$transport" "$maximum"
 }
 
+set_share() {
+  [[ -f "$binary" && -f "$configuration" ]] || fail 'Install testspeed first'
+  local enabled=$argument database='' url expected_health_version=''
+  case "$enabled" in on) database=/var/lib/testspeed/results.sqlite ;; off) ;; *) fail 'Use share on or share off' ;; esac
+  if [[ "$enabled" == on && ( -e "$share_unit" || -L "$share_unit" ) ]] && ! share_unit_is_managed; then
+    fail 'The sharing drop-in path contains an administrator file; move it to a different drop-in name before enabling sharing'
+  fi
+  stage=$(mktemp -d /tmp/testspeed-install.XXXXXX)
+  awk -v database="$database" '
+    /^[[:space:]]*SHARE_DB_PATH[[:space:]]*=/ { if (!seen++) print "SHARE_DB_PATH=" database; next }
+    { print }
+    END { if (!seen) print "SHARE_DB_PATH=" database }
+  ' "$configuration" > "$stage/share.env"
+  url=$(health_url "$stage/share.env")
+  backup_installation
+  atomic_file "$stage/share.env" "$configuration" "$(stat -c '%a' "$configuration")"
+  if [[ "$enabled" == on ]]; then
+    install -d -m 0755 -- "$share_unit_directory"
+    cat > "$stage/share.conf" <<'SHARE_SERVICE'
+# Managed by testspeed manage.sh share on.
+[Service]
+StateDirectory=testspeed
+StateDirectoryMode=0750
+SHARE_SERVICE
+    atomic_file "$stage/share.conf" "$share_unit" 0644
+  else
+    if share_unit_is_managed; then rm -f -- "$share_unit"; fi
+    rmdir -- "$share_unit_directory" 2>/dev/null || true
+  fi
+  "$systemctl_command" daemon-reload
+  "$systemctl_command" restart testspeed.service
+  if [[ -f "$version_file" ]]; then
+    expected_health_version=$(cat "$version_file")
+    if [[ "$expected_health_version" == v0.1.0 || ! "$expected_health_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then expected_health_version=''; fi
+  fi
+  wait_health "$url" "$expected_health_version"
+  transaction=0
+  printf 'Result sharing: %s. Existing settings and stored results preserved.\n' "$enabled"
+}
+
 remove_installation() {
   [[ -z "$argument" ]] || fail 'This action takes no version argument'
+  local reload=0
   if [[ -f "$unit" ]]; then
     "$systemctl_command" disable --now testspeed.service
     rm -f -- "$unit"
-    "$systemctl_command" daemon-reload
+    reload=1
   fi
+  if share_unit_is_managed; then rm -f -- "$share_unit"; reload=1; fi
+  rmdir -- "$share_unit_directory" 2>/dev/null || true
+  if (( reload )); then "$systemctl_command" daemon-reload; fi
   rm -f -- "$binary" "$manager" "$version_file"
   rmdir "$application_directory" 2>/dev/null || true
   if [[ "$action" == purge ]]; then
     rm -f -- "$configuration"
     rmdir "$configuration_directory" 2>/dev/null || true
-    printf 'Removed managed application, unit and configuration files\n'
+    printf 'Removed managed application, unit and configuration files; stored results retained\n'
   else
     printf 'Removed application; configuration retained at %s\n' "$configuration"
   fi
@@ -259,6 +320,7 @@ remove_installation() {
 case "$action" in
   install|update) install_package ;;
   mode) set_mode ;;
+  share) set_share ;;
   status) "$systemctl_command" status --no-pager testspeed.service ;;
   logs)
     if [[ -n "$test_root" && -z "${TESTSPEED_JOURNALCTL:-}" ]]; then fail 'Test logs require an explicit fake journalctl'; fi
@@ -266,6 +328,6 @@ case "$action" in
   restart|stop) "$systemctl_command" "$action" testspeed.service ;;
   version) [[ -f "$version_file" ]] || fail 'No installed version metadata'; cat "$version_file" ;;
   uninstall|purge) remove_installation ;;
-  help) printf 'Usage: manage.sh install|update [vX.Y.Z]\n       manage.sh mode websocket|http\n       manage.sh status|version|logs|restart|stop|uninstall|purge\n' ;;
+  help) printf 'Usage: manage.sh install|update [vX.Y.Z]\n       manage.sh mode websocket|http\n       manage.sh share on|off\n       manage.sh status|version|logs|restart|stop|uninstall|purge\n' ;;
   *) fail 'Unknown action; use help' ;;
 esac

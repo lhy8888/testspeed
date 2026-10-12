@@ -14,6 +14,9 @@ services:
       PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:-}"
       SERVER_LOCATION: "${SERVER_LOCATION:-}"
       GEOIP_ENABLED: "${GEOIP_ENABLED:-true}"
+      GEOIP_PROVIDER: "${GEOIP_PROVIDER:-auto}"
+      GEOIP_DB_PATH: "${GEOIP_DB_PATH:-}"
+      CLIENT_NETWORK_LABEL: "${CLIENT_NETWORK_LABEL:-}"
       TRUSTED_PROXIES: "${TRUSTED_PROXIES:-}"
     restart: unless-stopped
     read_only: true

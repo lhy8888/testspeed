@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { closeSync, mkdtempSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, existsSync, mkdtempSync, mkdirSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -17,6 +17,8 @@ function fixture(t) {
     binary: join(root, 'opt/testspeed/testspeed'), manager: join(root, 'opt/testspeed/manage.sh'),
     config: join(root, 'etc/testspeed/testspeed.env'), unit: join(root, 'etc/systemd/system/testspeed.service'),
     version: join(root, 'opt/testspeed/VERSION'),
+    shareDropIn: join(root, 'etc/systemd/system/testspeed.service.d/90-testspeed-share.conf'),
+    resultDatabase: join(root, 'var/lib/testspeed/results.sqlite'),
   };
   const state = join(directory, 'state.json');
   writeFileSync(state, JSON.stringify({ active: false, enabled: false, failRestart: 0 }));
@@ -153,4 +155,114 @@ test('uninstall keeps config and purge removes only managed files, leaving unrel
   assert.equal(spawnSync('test', ['-e', f.paths.binary]).status, 1);
   f.success(['purge']); assert.equal(spawnSync('test', ['-e', f.paths.config]).status, 1);
   assert.equal(readFileSync(certificate, 'utf8'), 'keep'); assert.equal(readFileSync(unrelated, 'utf8'), 'keep');
+});
+
+test('share on and off change only the result path and managed drop-in, retaining old custom units and data', t => {
+  const f = fixture(t); f.packageRelease('v0.1.4'); f.success(['install']);
+  const marker = join(f.directory, 'never-execute-configuration');
+  const custom = `ADDR=:8500\nNODE_NAME=$(touch ${marker})\nGEOIP_PROVIDER=offline\nGEOIP_DB_PATH=/private/location.mmdb\nSHARE_DB_PATH=/old/results.sqlite\n SHARE_DB_PATH = /duplicate/results.sqlite\n`;
+  writeFileSync(f.paths.config, custom); chmodSync(f.paths.config, 0o640);
+  const customUnit = '[Service]\nDynamicUser=yes\nProtectSystem=strict\nExecStart=/opt/testspeed/testspeed\n';
+  writeFileSync(f.paths.unit, customUnit);
+  const administratorDropIn = join(dirname(f.paths.shareDropIn), '20-administrator.conf');
+  mkdirSync(dirname(administratorDropIn), { recursive: true });
+  writeFileSync(administratorDropIn, '[Service]\nCPUWeight=200\n');
+  mkdirSync(dirname(f.paths.resultDatabase), { recursive: true });
+  writeFileSync(f.paths.resultDatabase, 'existing results are retained');
+
+  f.success(['share', 'on']);
+  const enabled = readFileSync(f.paths.config, 'utf8');
+  assert.equal(enabled.match(/^SHARE_DB_PATH=/gm)?.length, 1);
+  assert.match(enabled, /^SHARE_DB_PATH=\/var\/lib\/testspeed\/results\.sqlite$/m);
+  assert.match(enabled, /^ADDR=:8500$/m);
+  assert.match(enabled, /^GEOIP_DB_PATH=\/private\/location\.mmdb$/m);
+  assert.equal(statSync(f.paths.config).mode & 0o777, 0o640);
+  assert.equal(readFileSync(f.paths.unit, 'utf8'), customUnit);
+  assert.match(readFileSync(f.paths.shareDropIn, 'utf8'), /^StateDirectory=testspeed$/m);
+  assert.match(readFileSync(f.paths.shareDropIn, 'utf8'), /^StateDirectoryMode=0750$/m);
+  assert.equal(statSync(f.paths.shareDropIn).mode & 0o777, 0o644);
+  assert.equal(existsSync(marker), false);
+
+  f.success(['share', 'off']);
+  assert.match(readFileSync(f.paths.config, 'utf8'), /^SHARE_DB_PATH=$/m);
+  assert.equal(existsSync(f.paths.shareDropIn), false);
+  assert.equal(readFileSync(administratorDropIn, 'utf8'), '[Service]\nCPUWeight=200\n');
+  assert.equal(readFileSync(f.paths.unit, 'utf8'), customUnit);
+  assert.equal(readFileSync(f.paths.resultDatabase, 'utf8'), 'existing results are retained');
+  const commands = readFileSync(f.environment.FAKE_SYSTEM_LOG, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(commands.filter(args => args[0] === 'daemon-reload').length, 3);
+  assert.equal(commands.filter(args => args[0] === 'restart').length, 3);
+  assert.ok(commands.every(args => !args.some(arg => arg.includes('chown') || arg.includes('tmpfiles'))));
+  const requests = readFileSync(f.environment.FAKE_CURL_LOG, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(requests.filter(args => args.at(-1) === 'http://127.0.0.1:8500/healthz').length, 2);
+});
+
+test('share restart failures restore configuration, drop-in presence and the previous active service', t => {
+  const f = fixture(t); f.packageRelease('v0.1.4'); f.success(['install']);
+  const originalConfig = readFileSync(f.paths.config);
+  let state = JSON.parse(readFileSync(f.state)); state.failRestart = 1; writeFileSync(f.state, JSON.stringify(state));
+  assert.notEqual(f.invoke(['share', 'on']).status, 0);
+  assert.deepEqual(readFileSync(f.paths.config), originalConfig);
+  assert.equal(existsSync(f.paths.shareDropIn), false);
+  assert.equal(existsSync(dirname(f.paths.shareDropIn)), false);
+  assert.equal(JSON.parse(readFileSync(f.state)).active, true);
+
+  f.success(['share', 'on']);
+  const enabledConfig = readFileSync(f.paths.config); const managedDropIn = readFileSync(f.paths.shareDropIn);
+  state = JSON.parse(readFileSync(f.state)); state.failRestart = 1; writeFileSync(f.state, JSON.stringify(state));
+  assert.notEqual(f.invoke(['share', 'off']).status, 0);
+  assert.deepEqual(readFileSync(f.paths.config), enabledConfig);
+  assert.deepEqual(readFileSync(f.paths.shareDropIn), managedDropIn);
+  assert.equal(JSON.parse(readFileSync(f.state)).active, true);
+});
+
+test('share health failure rolls back the original managed drop-in without touching custom drop-ins or results', { timeout: 25000 }, t => {
+  const f = fixture(t); f.packageRelease('v0.1.4'); f.success(['install']); f.success(['share', 'on']);
+  const configuration = readFileSync(f.paths.config);
+  const dropIn = readFileSync(f.paths.shareDropIn);
+  const customDropIn = join(dirname(f.paths.shareDropIn), '70-custom.conf'); writeFileSync(customDropIn, 'retained administrator settings');
+  mkdirSync(dirname(f.paths.resultDatabase), { recursive: true }); writeFileSync(f.paths.resultDatabase, 'retained database');
+  const result = f.invoke(['share', 'off'], { FAKE_BAD_HEALTH: 'html' });
+  assert.notEqual(result.status, 0); assert.match(result.stderr, /restoring the previous files/);
+  assert.deepEqual(readFileSync(f.paths.config), configuration);
+  assert.deepEqual(readFileSync(f.paths.shareDropIn), dropIn);
+  assert.equal(readFileSync(customDropIn, 'utf8'), 'retained administrator settings');
+  assert.equal(readFileSync(f.paths.resultDatabase, 'utf8'), 'retained database');
+  assert.equal(JSON.parse(readFileSync(f.state)).active, true);
+});
+
+test('uninstall and purge remove only the managed sharing drop-in and preserve result databases', t => {
+  const f = fixture(t); f.packageRelease('v0.1.4'); f.success(['install']); f.success(['share', 'on']);
+  const customDropIn = join(dirname(f.paths.shareDropIn), '30-custom.conf'); writeFileSync(customDropIn, 'keep custom drop-in');
+  mkdirSync(dirname(f.paths.resultDatabase), { recursive: true }); writeFileSync(f.paths.resultDatabase, 'keep results');
+  const config = readFileSync(f.paths.config);
+  f.success(['uninstall']);
+  assert.equal(existsSync(f.paths.shareDropIn), false); assert.equal(existsSync(f.paths.unit), false);
+  assert.deepEqual(readFileSync(f.paths.config), config);
+  assert.equal(readFileSync(customDropIn, 'utf8'), 'keep custom drop-in');
+  assert.equal(readFileSync(f.paths.resultDatabase, 'utf8'), 'keep results');
+  f.success(['purge']);
+  assert.equal(existsSync(f.paths.config), false);
+  assert.equal(readFileSync(customDropIn, 'utf8'), 'keep custom drop-in');
+  assert.equal(readFileSync(f.paths.resultDatabase, 'utf8'), 'keep results');
+});
+
+test('sharing never overwrites or removes an administrator file at the reserved drop-in path', t => {
+  const f = fixture(t); f.packageRelease('v0.1.4'); f.success(['install']);
+  mkdirSync(dirname(f.paths.shareDropIn), { recursive: true });
+  const custom = '[Service]\nStateDirectory=custom-data\n'; writeFileSync(f.paths.shareDropIn, custom);
+  const config = readFileSync(f.paths.config);
+  const rejected = f.invoke(['share', 'on']); assert.notEqual(rejected.status, 0);
+  assert.match(rejected.stderr, /administrator file/);
+  assert.deepEqual(readFileSync(f.paths.config), config);
+  assert.equal(readFileSync(f.paths.shareDropIn, 'utf8'), custom);
+  f.success(['share', 'off']);
+  assert.match(readFileSync(f.paths.config, 'utf8'), /^SHARE_DB_PATH=$/m);
+  assert.equal(readFileSync(f.paths.shareDropIn, 'utf8'), custom);
+  // A rollback of an unrelated mode change also leaves this untouched.
+  const state = JSON.parse(readFileSync(f.state)); state.failRestart = 1; writeFileSync(f.state, JSON.stringify(state));
+  assert.notEqual(f.invoke(['mode', 'http']).status, 0);
+  assert.equal(readFileSync(f.paths.shareDropIn, 'utf8'), custom);
+  f.success(['uninstall']); f.success(['purge']);
+  assert.equal(readFileSync(f.paths.shareDropIn, 'utf8'), custom);
 });

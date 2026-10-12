@@ -44,6 +44,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if err := handler.Close(); err != nil {
+			slog.Error("close optional node services", "error", err)
+		}
+	}()
 	servers, listeners, err := bindServers(config, handler)
 	if err != nil {
 		return err

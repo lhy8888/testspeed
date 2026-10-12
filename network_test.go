@@ -98,6 +98,7 @@ func TestNonPublicAddressesNeverBecomeGeoLookupTargets(t *testing.T) {
 	}
 	handler := testServer(t, 2)
 	handler.config.GeoIPEnabled = true
+	handler.network.enabled = true // This test explicitly changes the fixture's disabled deployment configuration.
 	handler.config.ServerLocation = "北京 · 内网机房"
 	var calls atomic.Int32
 	handler.network.client.Transport = networkRoundTripper(func(*http.Request) (*http.Response, error) { calls.Add(1); return networkResponse(`{}`), nil })
@@ -118,6 +119,7 @@ func TestNonPublicAddressesNeverBecomeGeoLookupTargets(t *testing.T) {
 func TestNetworkLookupUsesFixedHTTPSProviderCachesAndMarksEgressApproximate(t *testing.T) {
 	handler := testServer(t, 2)
 	handler.config.GeoIPEnabled = true
+	handler.network.enabled = true
 	var calls atomic.Int32
 	handler.network.client.Transport = networkRoundTripper(func(r *http.Request) (*http.Response, error) {
 		calls.Add(1)
@@ -151,6 +153,7 @@ func TestNetworkLookupUsesFixedHTTPSProviderCachesAndMarksEgressApproximate(t *t
 func TestNetworkProviderFailuresAreBoundedCachedAndDoNotAffectTests(t *testing.T) {
 	handler := testServer(t, 2)
 	handler.config.GeoIPEnabled = true
+	handler.network.enabled = true
 	handler.config.ServerLocation = "configured"
 	var calls atomic.Int32
 	handler.network.client.Transport = networkRoundTripper(func(r *http.Request) (*http.Response, error) {

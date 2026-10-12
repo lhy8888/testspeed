@@ -1,0 +1,17 @@
+# Optional explicit result sharing. The default deployment requires no database.
+# Docker initializes an empty named volume from the image-owned directory,
+# giving the existing non-root process write access without a root init service.
+services:
+  testspeed:
+    environment:
+      SHARE_DB_PATH: /var/lib/testspeed/results.sqlite
+      SHARE_WRITE_TOKEN: "${SHARE_WRITE_TOKEN:-}"
+      SHARE_RETENTION_HOURS: "${SHARE_RETENTION_HOURS:-168}"
+      SHARE_MAX_RESULTS: "${SHARE_MAX_RESULTS:-10000}"
+    volumes:
+      - type: volume
+        source: testspeed-results
+        target: /var/lib/testspeed
+
+volumes:
+  testspeed-results:

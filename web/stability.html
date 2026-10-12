@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#ffffff">
+    <meta name="description" content="Measure connection stability with real HTTP round-trip times, percentiles and CSV export.">
+    <title>TESTSPEED · 连接稳定性</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/stability.css">
+    <script src="/stability.js" type="module"></script>
+  </head>
+  <body>
+    <header class="language-bar"><label class="visually-hidden" for="language-select" data-stability-text="language">语言</label><select id="language-select" aria-label="Language"><option value="zh">中文</option><option value="en">English</option></select></header>
+    <main class="stability-shell">
+      <a class="brand stability-brand" href="/" aria-label="TESTSPEED">
+        <svg class="brand-gauge" viewBox="0 0 160 100" aria-hidden="true"><path class="gauge-outer" d="M24 78a56 56 0 0 1 16.4-39.6M52 29.5a56 56 0 0 1 56 0M119.6 38.4A56 56 0 0 1 136 78"/><path class="gauge-middle" d="M36 78a44 44 0 0 1 88 0"/><path class="gauge-inner" d="M48 78a32 32 0 0 1 64 0"/><path class="gauge-needle" d="m75 75 43-43-32 51Z"/><circle class="gauge-hub" cx="80" cy="78" r="8"/><circle class="gauge-center" cx="80" cy="78" r="3"/></svg><span>TESTSPEED</span>
+      </a>
+      <h1 data-stability-text="title">连接稳定性</h1>
+      <p class="stability-intro" data-stability-text="intro">持续测量当前节点的 HTTP 往返时间，观察延迟波动和请求失败。</p>
+      <form id="stability-settings" class="stability-settings">
+        <fieldset id="stability-fields"><legend class="visually-hidden" data-stability-text="settings">测试设置</legend>
+          <label><span data-stability-text="duration">持续时间</span><select id="stability-duration"><option value="60000" data-stability-text="duration60">1 分钟</option><option value="120000" data-stability-text="duration120">2 分钟</option><option value="300000" data-stability-text="duration300">5 分钟</option></select></label>
+          <label><span data-stability-text="interval">请求间隔</span><select id="stability-interval"><option value="250">250 ms</option><option value="500">500 ms</option><option value="1000">1 s</option></select></label>
+          <label><span data-stability-text="threshold">延迟提醒</span><select id="stability-threshold"><option value="0" data-stability-text="disabled">关闭</option><option value="100">100 ms</option><option value="250">250 ms</option><option value="500">500 ms</option><option value="1000">1,000 ms</option></select></label>
+        </fieldset>
+        <div class="stability-actions"><button id="stability-start" class="stability-primary" type="submit" data-stability-text="start">开始测试</button><button id="stability-stop" class="stability-secondary" type="button" data-stability-text="stop" hidden>停止</button><button id="stability-export" class="stability-secondary" type="button" data-stability-text="export" disabled>导出 CSV</button></div>
+      </form>
+      <p id="stability-status" class="stability-status" role="status" aria-live="polite">点击开始，记录真实请求的延迟。</p>
+      <p id="stability-alert" class="stability-alert" role="status" hidden></p>
+      <section class="stability-metrics" aria-labelledby="stability-metrics-title">
+        <h2 id="stability-metrics-title" class="visually-hidden" data-stability-text="metrics">测量结果</h2>
+        <div><span data-stability-text="current">当前延迟</span><strong id="stability-current">—</strong><small>ms</small></div>
+        <div><span data-stability-text="average">平均延迟</span><strong id="stability-average">—</strong><small>ms</small></div>
+        <div><span data-stability-text="jitter">相邻延迟抖动</span><strong id="stability-jitter">—</strong><small>ms</small></div>
+        <div><span data-stability-text="failure">请求失败率</span><strong id="stability-failure">—</strong><small>%</small></div>
+      </section>
+      <section class="stability-chart-panel" aria-labelledby="stability-chart-heading">
+        <div class="stability-chart-heading"><h2 id="stability-chart-heading" data-stability-text="chart">延迟变化</h2><span id="stability-requests">0 次请求</span></div>
+        <div class="stability-chart-wrap"><svg id="stability-chart" viewBox="0 0 960 240" role="img" aria-labelledby="stability-chart-title stability-chart-description" preserveAspectRatio="none"><title id="stability-chart-title">HTTP 往返时间</title><desc id="stability-chart-description">绿线显示成功请求的延迟，红点显示失败请求。</desc><g class="stability-grid"><path d="M0 20H960M0 80H960M0 140H960M0 200H960"/></g><path id="stability-line" d=""/><path id="stability-failures" d=""/></svg><span id="stability-chart-max" class="stability-chart-max" hidden></span><span id="stability-chart-empty" class="stability-chart-empty" data-stability-text="empty">收到实际请求结果后显示曲线</span></div>
+        <div class="stability-chart-axis"><span>0 s</span><span id="stability-chart-end">60 s</span></div>
+        <p class="stability-chart-legend"><span class="stability-key-success" data-stability-text="success">成功请求</span><span class="stability-key-failure" data-stability-text="failed">失败请求</span></p>
+      </section>
+      <dl class="stability-percentiles"><div><dt data-stability-text="minimum">最低</dt><dd><span id="stability-minimum">—</span> <small>ms</small></dd></div><div><dt data-stability-text="maximum">最高</dt><dd><span id="stability-maximum">—</span> <small>ms</small></dd></div><div><dt>P50</dt><dd><span id="stability-p50">—</span> <small>ms</small></dd></div><div><dt>P95</dt><dd><span id="stability-p95">—</span> <small>ms</small></dd></div><div><dt>P99</dt><dd><span id="stability-p99">—</span> <small>ms</small></dd></div></dl>
+      <p class="stability-caption" data-stability-text="caption">这是 HTTP 请求的往返时间，包含浏览器和服务器处理；请求失败率不代表网络丢包率。失败请求不计入延迟分布，抖动仅计算相邻的成功请求。</p>
+      <p class="stability-caption" data-stability-text="traffic">每次仅请求当前测速节点的小型响应，不进行下载或上传测速。每次只有一个请求；慢请求会降低采样频率。页面进入后台、离线或点击停止时立即终止。</p>
+      <noscript><p class="error-message">请启用 JavaScript / Please enable JavaScript.</p></noscript>
+    </main>
+    <footer class="site-footer"><a href="/" data-stability-text="back">返回测速</a><a href="/deploy.html" data-stability-text="guide">部署教程</a><span>TESTSPEED</span></footer>
+  </body>
+</html>

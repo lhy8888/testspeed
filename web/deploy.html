@@ -22,12 +22,13 @@
         <a href="#install">安装到服务器</a>
         <a href="#maintenance">更新与日常维护</a>
         <a href="#paths">文件在哪里</a>
+        <a href="#features">测试项目与记录</a>
         <a href="#docker">Docker 部署</a>
         <a href="#help">文档与下载</a>
       </aside>
       <main>
         <div class="intro">
-          <p class="eyebrow">部署教程 · v0.1.3</p>
+          <p class="eyebrow">部署教程 · v0.1.4</p>
           <h1>把测速部署到你的服务器</h1>
           <p class="intro-text">一条命令安装，后续更新和维护也使用同一个管理工具。适用于公网和企业内网。</p>
           <div class="default-tags"><span>单端口 8080</span><span>默认 8 路并发</span><span>最多 30 路</span></div>
@@ -38,7 +39,7 @@
           <p>在目标服务器的终端执行。需要 Linux、systemd、sudo 权限，以及访问 GitHub 的网络；无需安装 Go、Node.js 或 Docker。</p>
           <div class="command-block featured">
             <div class="command-heading"><span>首次安装</span><button type="button" class="copy-button" data-copy="install-command" hidden>复制命令</button></div>
-            <pre id="install-command" tabindex="0"><code>curl -fsSL https://raw.githubusercontent.com/lhy8888/testspeed/v0.1.3/deploy/manage.sh | sudo bash -s -- install</code></pre>
+            <pre id="install-command" tabindex="0"><code>curl -fsSL https://raw.githubusercontent.com/lhy8888/testspeed/v0.1.4/deploy/manage.sh | sudo bash -s -- install</code></pre>
             <p class="copy-feedback" role="status" aria-live="polite"></p>
           </div>
           <p>脚本下载并校验安装包，安装网页和服务，创建 systemd 服务并启动。安装后，在浏览器打开：</p>
@@ -81,11 +82,34 @@
         <section id="paths" aria-labelledby="paths-title">
           <h2 id="paths-title">文件在哪里</h2>
           <dl class="path-list"><div><dt>程序与网页</dt><dd><code>/opt/testspeed/testspeed</code></dd></div><div><dt>管理工具</dt><dd><code>/opt/testspeed/manage.sh</code></dd></div><div><dt>服务配置</dt><dd><code>/etc/testspeed/testspeed.env</code></dd></div><div><dt>systemd 服务</dt><dd><code>/etc/systemd/system/testspeed.service</code></dd></div></dl>
-          <p class="small-note">修改配置后重启服务。使用 HTTPS、自定义地址或离线安装时，参照<a href="https://github.com/lhy8888/testspeed/blob/v0.1.3/docs/deployment.md">完整部署文档</a>。</p>
-          <details class="foldout"><summary>IP 与所在地显示</summary><div class="foldout-body">
-            <p>GeoIP 默认使用 FreeIPAPI 的固定 HTTPS 服务，将公开客户端 IP 发给第三方查询近似网络所在地；私网地址不查询。查询失败不影响测速，结果不代表 GPS 位置。</p>
-            <p>服务器位置可在配置中设置 <code>SERVER_LOCATION=中国·上海</code>；设置 <code>GEOIP_ENABLED=false</code> 可禁用第三方查询。未手动配置时，服务器自动位置只近似反映公网出口。</p>
-            <p class="small-note">反向代理需显式配置 <code>TRUSTED_PROXIES</code>，默认忽略转发头；完整来源校验与额度说明见部署文档。</p>
+          <p class="small-note">修改配置后重启服务。使用 HTTPS、自定义地址或离线安装时，参照<a href="https://github.com/lhy8888/testspeed/blob/v0.1.4/docs/deployment.md">完整部署文档</a>。</p>
+          <details class="foldout"><summary>IP、所在地与 ISP/ASN</summary><div class="foldout-body">
+            <p>GeoIP 默认使用 FreeIPAPI 的固定 HTTPS 服务，将公开客户端 IP 发给第三方查询近似网络所在地；私网地址不查询。ISP/ASN 仅显示查询或授权数据库实际提供的信息，缺失时留空。查询失败不影响测速，结果不代表 GPS 位置。</p>
+            <p>服务器位置可设置 <code>SERVER_LOCATION=中国·上海</code>，内网客户端标签使用 <code>CLIENT_NETWORK_LABEL=上海园区</code>。设置 <code>GEOIP_ENABLED=false</code> 关闭在线和离线查询，保留手填标签。未手动配置时，在线服务器位置只近似反映公网出口。</p>
+            <p><code>GEOIP_PROVIDER=auto</code> 默认在线优先，配置 <code>GEOIP_DB_PATH</code> 后用本地 MMDB 补缺或降级；<code>online</code> 仅在线；<code>offline</code> 仅查询已配置的本地库，不调用第三方。数据库须自行获取正确授权，程序不会下载；离线无法探测服务器公网出口，应手填机房位置。</p>
+            <p class="small-note">反向代理需显式配置 <code>TRUSTED_PROXIES</code>，默认忽略转发头；库路径、支持的 schema、来源校验与额度说明见部署文档。</p>
+          </div></details>
+          <details class="foldout"><summary>可选分享：启用、关闭与数据维护</summary><div class="foldout-body">
+            <p>默认不启用服务器数据库。本地历史和导出直接可用；分享需要用户点击提交，是客户端报告，不是服务器认证的速度证明。</p>
+            <div class="command-block"><div class="command-heading"><span>启用 SQLite 分享</span><button type="button" class="copy-button" data-copy="share-on-command" hidden>复制</button></div><pre id="share-on-command" tabindex="0"><code>sudo /opt/testspeed/manage.sh share on</code></pre><p class="copy-feedback" role="status" aria-live="polite"></p></div>
+            <p>数据库位于 <code>/var/lib/testspeed/results.sqlite</code>。命令兼容新旧 systemd 安装，设置所需的可写状态目录并重启；默认最多 10000 条、保留 168 小时。</p>
+            <div class="command-block"><div class="command-heading"><span>关闭分享并保留数据</span><button type="button" class="copy-button" data-copy="share-off-command" hidden>复制</button></div><pre id="share-off-command" tabindex="0"><code>sudo /opt/testspeed/manage.sh share off</code></pre><p class="copy-feedback" role="status" aria-live="polite"></p></div>
+            <p>可配置 <code>SHARE_WRITE_TOKEN</code> 保护新建报告，读取使用分享链接；令牌不用于测速，不出现在共享链接或本地历史。用户可撤销当前页面刚创建的分享。分享报告不包含客户端 IP、所在地或令牌。</p>
+            <p class="small-note">关闭、更新、卸载和清理配置都保留分享数据库。备份、恢复、显式删除和 Docker 数据卷说明见<a href="https://github.com/lhy8888/testspeed/blob/v0.1.4/docs/deployment.md#可选结果分享">完整部署文档</a>。</p>
+          </div></details>
+        </section>
+
+        <section id="features" aria-labelledby="features-title">
+          <h2 id="features-title">测试项目与记录</h2>
+          <p>打开测速页的“更多信息 / Show more info”，可以选择完整测速、仅下载或仅延迟。只运行选择的项目；仅下载会跳过上传流量，仅延迟使用小型 HTTP 往返请求。</p>
+          <details class="foldout"><summary>固定时长、自适应与流量预算</summary><div class="foldout-body">
+            <p>默认固定完整时长：每方向正式计量 10 秒，预热下限 1.5 秒并按 RTT 延长。灰色下载数字来自真实预热数据，最终结果排除预热。</p>
+            <p>自适应为可选项，正式计量至少 5 秒和 8 个 RTT，连续真实窗口稳定且没有失败或测量调度异常时才提前结束；未稳定则继续到所选最长时长。上传结果由服务器冻结实际收到的字节和实际计量时长。</p>
+            <p>流量预算按每方向独立计算，包含预热，0 表示不限。已在途数据和有界关闭排空会产生余量，不能当作严格网卡流量封顶。预算在正式计量开始前耗尽时显示“未测”；已有短窗口会标明预算结束，不保证已经充分收敛。</p>
+          </div></details>
+          <details class="foldout"><summary>连接稳定性、最近 50 条历史与导出</summary><div class="foldout-body">
+            <p><a href="/stability.html">连接稳定性页面</a>可持续采样 1、2、5 分钟，显示延迟分布 P50/P95/P99、抖动、请求失败率和 CSV。只请求当前节点的小型响应，不开展下载或上传测速。HTTP 请求失败率不是网络丢包率。</p>
+            <p>网页保留最近 50 条本地历史，可导出单条 JSON、CSV、PNG 或全部历史 CSV，也可清理历史。数据仅留在当前浏览器，不自动上传，导出排除 IP、所在地及令牌。</p>
           </div></details>
         </section>
 
@@ -94,23 +118,28 @@
           <p>也可使用 Docker Compose 部署。选择一种部署方式，让网页端口供对应服务使用。</p>
           <details class="foldout"><summary>官方 Docker Engine + Compose</summary><div class="foldout-body">
             <p>需要 Git、Docker Engine 和 Compose 插件。在服务器上执行：</p>
-            <div class="command-block"><div class="command-heading"><span>安装并启动</span><button type="button" class="copy-button" data-copy="docker-command" hidden>复制</button></div><pre id="docker-command" tabindex="0"><code>sudo git clone --depth 1 --branch v0.1.3 https://github.com/lhy8888/testspeed.git /opt/testspeed-src
+            <div class="command-block"><div class="command-heading"><span>安装并启动</span><button type="button" class="copy-button" data-copy="docker-command" hidden>复制</button></div><pre id="docker-command" tabindex="0"><code>sudo git clone --depth 1 --branch v0.1.4 https://github.com/lhy8888/testspeed.git /opt/testspeed-src
 sudo docker compose --project-directory /opt/testspeed-src --file /opt/testspeed-src/compose.yaml up --build --detach
 sudo docker compose --project-directory /opt/testspeed-src --file /opt/testspeed-src/compose.yaml logs --follow</code></pre><p class="copy-feedback" role="status" aria-live="polite"></p></div>
             <p class="small-note">源码目录为 <code>/opt/testspeed-src</code>；已存在该目录时参照完整文档处理。默认网页端口为 8080。</p>
           </div></details>
           <details class="foldout"><summary>Docker 通过 Snap 安装</summary><div class="foldout-body">
             <p>如果 <code>sudo sh -c 'command -v docker'</code> 输出 <code>/snap/bin/docker</code>，源码应放在 Snap 可读取的目录，并同时指定 Snap 配置。</p>
-            <div class="command-block"><div class="command-heading"><span>全新 Snap 部署</span><button type="button" class="copy-button" data-copy="snap-command" hidden>复制</button></div><pre id="snap-command" tabindex="0"><code>sudo git clone --depth 1 --branch v0.1.3 https://github.com/lhy8888/testspeed.git /var/snap/docker/common/testspeed-src
+            <div class="command-block"><div class="command-heading"><span>全新 Snap 部署</span><button type="button" class="copy-button" data-copy="snap-command" hidden>复制</button></div><pre id="snap-command" tabindex="0"><code>sudo git clone --depth 1 --branch v0.1.4 https://github.com/lhy8888/testspeed.git /var/snap/docker/common/testspeed-src
 sudo docker compose --project-directory /var/snap/docker/common/testspeed-src --file /var/snap/docker/common/testspeed-src/compose.yaml --file /var/snap/docker/common/testspeed-src/compose.snap.yaml config --quiet
 sudo docker compose --project-directory /var/snap/docker/common/testspeed-src --file /var/snap/docker/common/testspeed-src/compose.yaml --file /var/snap/docker/common/testspeed-src/compose.snap.yaml up --build --detach</code></pre><p class="copy-feedback" role="status" aria-live="polite"></p></div>
-            <p class="small-note">已经克隆到 <code>/opt</code> 的用户可保留原目录，按<a href="https://github.com/lhy8888/testspeed/blob/v0.1.3/docs/deployment.md">完整部署文档</a>创建副本。使用 Snap 配置无需重装 Docker。</p>
+            <p class="small-note">已经克隆到 <code>/opt</code> 的用户可保留原目录，按<a href="https://github.com/lhy8888/testspeed/blob/v0.1.4/docs/deployment.md">完整部署文档</a>创建副本。使用 Snap 配置无需重装 Docker。</p>
+          </div></details>
+          <details class="foldout"><summary>Docker 可选持久分享</summary><div class="foldout-body">
+            <p>需要服务器分享时，在基础配置后增加 <code>compose.share.yaml</code>。它使用持久数据卷，数据库位于 <code>/var/lib/testspeed/results.sqlite</code>：</p>
+            <pre tabindex="0"><code>sudo docker compose --project-directory /opt/testspeed-src --file /opt/testspeed-src/compose.yaml --file /opt/testspeed-src/compose.share.yaml up --build --detach</code></pre>
+            <p class="small-note">Snap 换成公共源码目录并同时加 Snap override。后续维护沿用选定的 override；<code>down</code> 保留分享数据卷，<code>down --volumes</code> 会删除数据，仅在确认清除全部分享时使用。Docker 离线 MMDB 需自行提供只读挂载，详见完整部署文档。</p>
           </div></details>
         </section>
 
         <section id="help" aria-labelledby="help-title">
           <h2 id="help-title">文档与下载</h2>
-          <div class="resource-links"><a href="https://github.com/lhy8888/testspeed/blob/v0.1.3/docs/deployment.md">完整部署文档 <span aria-hidden="true">↗</span></a><a href="https://github.com/lhy8888/testspeed/releases/latest">安装包与校验清单 <span aria-hidden="true">↗</span></a><a href="https://github.com/lhy8888/testspeed">GitHub 仓库 <span aria-hidden="true">↗</span></a></div>
+          <div class="resource-links"><a href="https://github.com/lhy8888/testspeed/blob/v0.1.4/docs/deployment.md">完整部署文档 <span aria-hidden="true">↗</span></a><a href="https://github.com/lhy8888/testspeed/releases/latest">安装包与校验清单 <span aria-hidden="true">↗</span></a><a href="https://github.com/lhy8888/testspeed">GitHub 仓库 <span aria-hidden="true">↗</span></a></div>
           <p class="small-note">企业内网无法访问 GitHub 时，可在联网机器下载对应安装包和 SHA256SUMS，再带入服务器；离线步骤见完整部署文档。</p>
         </section>
         <footer class="page-footer"><span>TESTSPEED · 部署与维护</span><a href="/">返回测速</a></footer>

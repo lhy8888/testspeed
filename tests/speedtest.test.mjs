@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { setImmediate } from 'node:timers/promises';
-import { chooseConcurrencyTarget, chooseWebSocketHandshakeTimeout, chooseWebSocketMessageBytes, createUploadBody, estimateBDPBytes, latencyStatistics, loadConfig, MeasurementEngine, normalizeConfig, normalizeOptions, SpeedTest, toMbps } from '../web/speedtest.js';
+import { chooseConcurrencyTarget, chooseWebSocketHandshakeTimeout, chooseWebSocketMessageBytes, createUploadBody, estimateBDPBytes, isThroughputStable, latencyStatistics, loadConfig, MeasurementEngine, normalizeConfig, normalizeOptions, SpeedTest, toMbps } from '../web/speedtest.js';
 
 const config = () => ({ protocolVersion: 2, nodes: [{ id: 'local', name: '本地节点', baseUrl: '' }], performance: { measurementOrigins: [8081, 8082, 8083, 8084].map(port => `http://localhost:${port}/`), maxStreams: 24 }, test: { warmupMs: 0 } });
 const node = { id: 'local', name: '本地节点', baseUrl: 'http://localhost/' };
@@ -814,7 +814,7 @@ test('single-port WebSocket defaults to eight fixed streams and supports thirty 
   assert.equal(normalized.performance.transport, 'websocket');
   assert.equal(normalized.performance.maxStreams, 30);
   assert.equal(normalized.test.minStreams, 8);
-  assert.deepEqual(normalizeOptions(normalized), { mode: 'manual', streams: 8, durationMs: undefined, warmupOverride: undefined });
+  assert.deepEqual(normalizeOptions(normalized), { mode: 'manual', streams: 8, durationMs: undefined, warmupOverride: undefined, testType: 'full', measurementPolicy: 'fixed', minDurationMs: 5000, maxBytes: 0 });
   assert.equal(normalizeOptions(normalized, { streams: 30 }).streams, 30);
   assert.throws(() => normalizeOptions(normalized, { streams: 31 }), /并行传输/);
   assert.equal(normalizeConfig({ ...config(), performance: { transport: 'websocket', maxStreams: 999 } }).performance.maxStreams, 30);
@@ -1068,4 +1068,392 @@ test('cancelling queued WebSocket upload deletes the server session before waiti
   await rejected; // No 2-second close timeout or queue drain is necessary; DELETE unblocks the peer.
   assert.equal(deleted, true);
   assert.equal(ws.sockets.every(socket => socket.readyState === 3), true);
+});
+
+test('test plans validate byte budgets and preserve the fixed full-test defaults', () => {
+  const normalized = websocketConfig();
+  const defaults = normalizeOptions(normalized);
+  assert.equal(defaults.testType, 'full');
+  assert.equal(defaults.measurementPolicy, 'fixed');
+  assert.equal(defaults.maxBytes, 0);
+  for (const testType of ['upload', '', 1]) assert.throws(() => normalizeOptions(normalized, { testType }), /完整、下载或延迟/);
+  for (const measurementPolicy of ['speed', '', 1]) assert.throws(() => normalizeOptions(normalized, { measurementPolicy }), /测量策略/);
+  for (const maxBytes of [-1, 1.5, Infinity, NaN, 1024 ** 4 + 1]) assert.throws(() => normalizeOptions(normalized, { maxBytes }), /流量预算/);
+  for (const minDurationMs of [4999, 5000.5, 10001]) assert.throws(() => normalizeOptions(normalized, { durationMs: 10000, minDurationMs }), /最短测量时间/);
+  assert.equal(normalizeOptions(normalized, { maxBytes: 1024 ** 4 }).maxBytes, 1024 ** 4);
+});
+
+test('convergence requires three complete positive windows and rejects noise, drops and a continuing ramp', () => {
+  const windows = rates => rates.map(mbps => ({ mbps, elapsedMs: 1000 }));
+  assert.equal(isThroughputStable(windows([100000, 101000, 100500])), true);
+  assert.equal(isThroughputStable(windows([100, 100])), false);
+  assert.equal(isThroughputStable(windows([0, 0, 0])), false);
+  assert.equal(isThroughputStable(windows([100, 90, 70])), false);
+  assert.equal(isThroughputStable(windows([100, 105, 110])), false);
+  assert.equal(isThroughputStable(windows([100, 70, 100])), false);
+  assert.equal(isThroughputStable([{ mbps: 100, elapsedMs: 900 }, ...windows([100, 100])]), false);
+});
+
+test('latency-only performs its full idle sample budget without any reachability or payload requests', async t => {
+  mockTime(t);
+  const requests = [];
+  const events = [];
+  const engine = new MeasurementEngine({ clock: () => Date.now(), onUpdate: event => events.push(event),
+    webSocketFactory: () => { throw new Error('latency-only must not open a socket'); },
+    fetchImpl: async url => {
+      requests.push(new URL(url).pathname);
+      assert.equal(new URL(url).pathname, '/api/ping');
+      return new Response('{}');
+    },
+  });
+  const pending = engine.run({ ...websocketConfig(), test: { warmupMs: 0, pingSamples: 3 } }, { testType: 'latency' });
+  await setImmediate();
+  await advance(t, 90);
+  await advance(t, 90);
+  const result = await pending;
+  assert.deepEqual(requests, ['/api/ping', '/api/ping', '/api/ping']);
+  assert.equal(result.schemaVersion, 1);
+  assert.equal(result.testType, 'latency');
+  assert.equal(result.transport, null);
+  assert.equal(result.download, null);
+  assert.equal(result.upload, null);
+  assert.equal(result.downloadMbps, null);
+  assert.equal(result.uploadMbps, null);
+  assert.deepEqual(result.latency, { idle: { medianMs: 0, jitterMs: 0, samples: 3, failed: 0, attempts: 3 }, download: null, upload: null });
+  assert.equal(events.at(-1).type, 'complete');
+});
+
+test('download-only completes a real body window and never allocates or posts an upload session', async t => {
+  mockTime(t);
+  const requests = [];
+  const engine = new MeasurementEngine({ clock: () => Date.now(), randomFill: bytes => bytes.fill(1), fetchImpl: async (url, options) => {
+    const address = new URL(url);
+    requests.push({ path: address.pathname, method: options.method || 'GET' });
+    if (address.pathname !== '/api/download') return new Response('{}');
+    if (address.searchParams.has('bytes')) return new Response(new Uint8Array(16384), { headers: { 'Content-Type': 'application/octet-stream' } });
+    return new Response(new ReadableStream({ start(controller) {
+      const timer = setTimeout(() => controller.enqueue(new Uint8Array(1000)), 100);
+      options.signal.addEventListener('abort', () => { clearTimeout(timer); controller.error(options.signal.reason); }, { once: true });
+    } }));
+  } });
+  const pending = engine.run({ ...config(), performance: { measurementOrigins: ['/'] }, test: { warmupMs: 0, downloadDurationMs: 500, pingSamples: 1 } }, { testType: 'download', mode: 'manual', streams: 1 });
+  await setImmediate();
+  await advance(t, 100);
+  await advance(t, 400);
+  const result = await pending;
+  assert.equal(result.testType, 'download');
+  assert.equal(result.download.measuredBytes, 1000);
+  assert.equal(result.download.completionReason, 'duration');
+  assert.equal(result.downloadMbps, .016);
+  assert.equal(result.upload, null);
+  assert.equal(result.uploadMbps, null);
+  assert.equal(result.latency.upload, null);
+  assert.equal(requests.some(request => request.method !== 'GET' || request.path.includes('upload')), false);
+});
+
+for (const transport of ['http', 'websocket']) {
+  for (const warmupMs of [0, 500]) {
+    test(`${transport} byte budget ends on actual received bytes and reports ${warmupMs ? 'incomplete warm-up' : 'a measured partial window'}`, async t => {
+      mockTime(t);
+      const normalized = transport === 'websocket' ? websocketConfig() : normalizeConfig(config());
+      let delivered = 0;
+      let cancelled = false;
+      const ws = fakeWebSockets(socket => setTimeout(() => { delivered += 1200; socket.message(new ArrayBuffer(1200)); }, 100));
+      const engine = new MeasurementEngine({ clock: () => Date.now(), randomFill: bytes => bytes.fill(1), webSocketFactory: ws.factory,
+        fetchImpl: async (url, options) => {
+          if (new URL(url).pathname !== '/api/download') return new Response('{}');
+          return new Response(new ReadableStream({ start(controller) {
+            const timer = setTimeout(() => { delivered += 1200; controller.enqueue(new Uint8Array(1200)); }, 100);
+            options.signal.addEventListener('abort', () => { cancelled = true; clearTimeout(timer); controller.error(options.signal.reason); }, { once: true });
+          } }));
+        },
+      });
+      const pending = engine.downloadPhase(node, { ...normalized.test, warmupMs, downloadDurationMs: 10000 }, normalized.performance,
+        { mode: 'manual', streams: 1, maxBytes: 1000 }, { medianMs: 0 }, new AbortController().signal);
+      await setImmediate();
+      await advance(t, 100);
+      const result = await pending;
+      assert.equal(result.totalBytes, delivered);
+      assert.equal(result.totalBytes, 1200, 'the event block is reported in full; received overshoot is not hidden');
+      assert.equal(result.budgetOvershootBytes, 200);
+      assert.equal(result.completionReason, 'budget');
+      assert.equal(result.durationMs, warmupMs ? 0 : 100);
+      assert.equal(result.complete, warmupMs === 0);
+      assert.equal(result.mbps, warmupMs ? null : .096);
+      assert.equal(result.incompleteReason, warmupMs ? 'budget-before-measurement' : null);
+      assert.equal(result.failedRequests, 0);
+      if (transport === 'websocket') assert.ok(ws.sockets.every(socket => socket.readyState === 3));
+      else assert.equal(cancelled, true);
+    });
+  }
+}
+
+for (const transport of ['http', 'websocket']) {
+  for (const policy of ['fixed', 'adaptive']) {
+    test(`${transport} ${policy} uses real stable windows and preserves the chosen measurement deadline`, async t => {
+      mockTime(t);
+      const normalized = transport === 'websocket' ? websocketConfig() : normalizeConfig(config());
+      let delivered = 0;
+      const ws = fakeWebSockets(socket => {
+        const timer = setInterval(() => { delivered += 1000; socket.message(new ArrayBuffer(1000)); }, 100);
+        const originalClose = socket.close;
+        socket.close = function (...args) { clearInterval(timer); return originalClose.apply(this, args); };
+      });
+      const engine = new MeasurementEngine({ clock: () => Date.now(), randomFill: bytes => bytes.fill(1), webSocketFactory: ws.factory,
+        fetchImpl: async (url, options) => {
+          if (new URL(url).pathname !== '/api/download') return new Response('{}');
+          return new Response(new ReadableStream({ start(controller) {
+            const timer = setInterval(() => { delivered += 1000; controller.enqueue(new Uint8Array(1000)); }, 100);
+            options.signal.addEventListener('abort', () => { clearInterval(timer); controller.error(options.signal.reason); }, { once: true });
+          } }));
+        },
+      });
+      const pending = engine.downloadPhase(node, { ...normalized.test, warmupMs: 0, downloadDurationMs: 10000 }, normalized.performance,
+        { mode: 'manual', streams: 1, measurementPolicy: policy }, { medianMs: 0 }, new AbortController().signal);
+      let completed = false;
+      pending.then(() => { completed = true; });
+      await setImmediate();
+      for (let elapsed = 0; elapsed < 5000; elapsed += 200) await advance(t, 200);
+      assert.equal(completed, policy === 'adaptive');
+      if (policy === 'fixed') for (let elapsed = 5000; elapsed < 10000; elapsed += 200) await advance(t, 200);
+      const result = await pending;
+      assert.equal(result.completionReason, policy === 'adaptive' ? 'stable' : 'duration');
+      assert.equal(result.durationMs, policy === 'adaptive' ? 5000 : 10000);
+      assert.equal(result.mbps, toMbps(result.measuredBytes, result.durationMs));
+      assert.equal(result.totalBytes, delivered - (transport === 'http' ? 1000 : 0), 'a stream chunk still queued at cutoff is not received until read() delivers it');
+      assert.equal(result.complete, true);
+      assert.equal(result.failedRequests, 0);
+    });
+  }
+}
+
+test('a falling transfer does not get an early stable result at the minimum deadline', async t => {
+  mockTime(t);
+  const began = Date.now();
+  const normalized = websocketConfig();
+  const ws = fakeWebSockets(socket => {
+    const timer = setInterval(() => socket.message(new ArrayBuffer(Date.now() - began < 4500 ? 1000 : 400)), 100);
+    const originalClose = socket.close;
+    socket.close = function (...args) { clearInterval(timer); return originalClose.apply(this, args); };
+  });
+  const controller = new AbortController();
+  const engine = new MeasurementEngine({ clock: () => Date.now(), randomFill: bytes => bytes.fill(1), webSocketFactory: ws.factory, fetchImpl: async () => new Response('{}') });
+  const pending = engine.downloadPhase(node, { ...normalized.test, warmupMs: 0, downloadDurationMs: 10000 }, normalized.performance,
+    { mode: 'manual', streams: 1, measurementPolicy: 'adaptive' }, { medianMs: 0 }, controller.signal);
+  const rejected = assert.rejects(pending, { name: 'AbortError' });
+  await setImmediate();
+  for (let elapsed = 0; elapsed < 6000; elapsed += 200) await advance(t, 200);
+  assert.equal(ws.sockets[0].readyState, 1, 'the recent throughput drop prevents early completion at five seconds');
+  controller.abort(new DOMException('cancelled', 'AbortError'));
+  await rejected;
+  assert.equal(ws.sockets.every(socket => socket.readyState === 3), true);
+});
+
+for (const transport of ['http', 'websocket']) {
+  test(`${transport} adaptive upload freezes server counts before closing queues and honors a racing budget`, async t => {
+    mockTime(t);
+    const began = Date.now();
+    const ws = fakeWebSockets();
+    const normalized = transport === 'websocket' ? websocketConfig() : normalizeConfig(config());
+    let finishCalls = 0;
+    let deleted = false;
+    let frozen = null;
+    const engine = new MeasurementEngine({ clock: () => Date.now(), randomFill: bytes => bytes.fill(1), webSocketFactory: ws.factory, taskYield: () => setImmediate(),
+      fetchImpl: async (url, options) => {
+        const address = new URL(url);
+        if (address.pathname === '/api/upload-sessions') {
+          assert.equal(JSON.parse(options.body).maxBytes, 1_000_000);
+          return new Response('{"id":"adaptive-upload"}', { status: 201 });
+        }
+        if (address.pathname === '/api/upload') return abortablePending(options.signal);
+        if (address.pathname === '/api/upload-sessions/adaptive-upload/finish') {
+          assert.deepEqual(JSON.parse(options.body), { reason: 'stable' });
+          finishCalls += 1;
+          // This additional 37 ms/received bytes belongs to the server's
+          // frozen window, never the preceding poll or queued browser data.
+          frozen = { measuredBytes: 5037 * 125, totalBytes: 5037 * 125, measurementElapsedMs: 5037, finished: true,
+            completionReason: transport === 'http' ? 'stable' : 'budget' };
+          return new Response(JSON.stringify(frozen));
+        }
+        if (address.pathname === '/api/upload-sessions/adaptive-upload' && options.method === 'DELETE') { deleted = true; return new Response(null, { status: 204 }); }
+        if (address.pathname === '/api/upload-sessions/adaptive-upload') {
+          const elapsed = Date.now() - began;
+          return new Response(JSON.stringify(frozen || { measuredBytes: elapsed * 125, totalBytes: elapsed * 125, measurementElapsedMs: elapsed, finished: false }));
+        }
+        return new Response('{}');
+      },
+    });
+    const pending = engine.uploadPhase(node, { ...normalized.test, warmupMs: 0, uploadDurationMs: 10000 }, { ...normalized.performance, uploadBlockBytes: 65536 },
+      { mode: 'manual', streams: 1, measurementPolicy: 'adaptive', maxBytes: 1_000_000 }, { medianMs: 0 }, new AbortController().signal);
+    await setImmediate();
+    for (let elapsed = 0; elapsed < 5000; elapsed += 200) await advance(t, 200);
+    const result = await pending;
+    assert.equal(finishCalls, 1);
+    assert.equal(result.measuredBytes, 629625);
+    assert.equal(result.durationMs, 5037);
+    assert.equal(result.mbps, 1);
+    assert.equal(result.completionReason, transport === 'http' ? 'stable' : 'budget');
+    assert.equal(result.failedRequests, 0);
+    assert.equal(deleted, true);
+    assert.ok(ws.sockets.every(socket => socket.readyState === 3));
+  });
+}
+
+test('adaptive download waits for eight RTTs of actual measurement after the RTT-aware warm-up', async t => {
+  mockTime(t);
+  const normalized = websocketConfig();
+  const ws = fakeWebSockets(socket => {
+    const timer = setInterval(() => socket.message(new ArrayBuffer(1000)), 100);
+    const originalClose = socket.close;
+    socket.close = function (...args) { clearInterval(timer); return originalClose.apply(this, args); };
+  });
+  const engine = new MeasurementEngine({ clock: () => Date.now(), randomFill: bytes => bytes.fill(1), webSocketFactory: ws.factory, fetchImpl: async () => new Response('{}') });
+  const pending = engine.downloadPhase(node, { ...normalized.test, warmupMs: 0, downloadDurationMs: 10000 }, normalized.performance,
+    { mode: 'manual', streams: 1, measurementPolicy: 'adaptive' }, { medianMs: 750 }, new AbortController().signal);
+  await setImmediate();
+  for (let elapsed = 0; elapsed < 11000; elapsed += 200) await advance(t, 200);
+  assert.equal(ws.sockets[0].readyState, 1, 'five measured seconds cannot truncate a 750 ms RTT link');
+  for (let elapsed = 11000; elapsed < 12000; elapsed += 200) await advance(t, 200);
+  const result = await pending;
+  assert.equal(result.warmupMs, 6000);
+  assert.equal(result.durationMs, 6000);
+  assert.equal(result.completionReason, 'stable');
+  assert.equal(result.mbps, toMbps(result.measuredBytes, 6000));
+});
+
+test('a recovered real socket failure remains visible and prevents an adaptive success from shortening the window', async t => {
+  mockTime(t);
+  const normalized = websocketConfig();
+  const ws = fakeWebSockets(socket => {
+    const timer = setInterval(() => socket.message(new ArrayBuffer(1000)), 100);
+    const originalClose = socket.close;
+    socket.close = function (...args) { clearInterval(timer); return originalClose.apply(this, args); };
+    if (ws.sockets.indexOf(socket) === 0) setTimeout(() => { clearInterval(timer); socket.serverClose(1006, 'network_failed'); }, 500);
+  });
+  const engine = new MeasurementEngine({ clock: () => Date.now(), randomFill: bytes => bytes.fill(1), webSocketFactory: ws.factory, fetchImpl: async () => new Response('{}') });
+  const pending = engine.downloadPhase(node, { ...normalized.test, warmupMs: 0, downloadDurationMs: 10000 }, normalized.performance,
+    { mode: 'manual', streams: 1, measurementPolicy: 'adaptive' }, { medianMs: 0 }, new AbortController().signal);
+  await setImmediate();
+  for (let elapsed = 0; elapsed < 6000; elapsed += 200) await advance(t, 200);
+  assert.equal(ws.sockets.length, 2);
+  assert.equal(ws.sockets[1].readyState, 1, 'a successful retry cannot conceal the failed request or claim early stability');
+  for (let elapsed = 6000; elapsed < 10000; elapsed += 200) await advance(t, 200);
+  const result = await pending;
+  assert.equal(result.failedRequests, 1);
+  assert.equal(result.durationMs, 10000);
+  assert.equal(result.completionReason, 'duration');
+});
+
+for (const transport of ['http', 'websocket']) {
+  test(`${transport} upload budget can honestly finish during warm-up without counting browser queues as a zero-Mbps result`, async t => {
+    mockTime(t);
+    const began = Date.now();
+    const ws = fakeWebSockets();
+    const normalized = transport === 'websocket' ? websocketConfig() : normalizeConfig(config());
+    let deleted = false;
+    const engine = new MeasurementEngine({ clock: () => Date.now(), randomFill: bytes => bytes.fill(1), webSocketFactory: ws.factory, taskYield: () => setImmediate(),
+      fetchImpl: async (url, options) => {
+        const address = new URL(url);
+        if (address.pathname === '/api/upload-sessions') {
+          assert.equal(JSON.parse(options.body).maxBytes, 1000);
+          return new Response('{"id":"budget-upload"}', { status: 201 });
+        }
+        if (address.pathname === '/api/upload') {
+          assert.equal(options.body.size, 1000, 'a small budget must not enqueue a giant HTTP Blob');
+          return abortablePending(options.signal);
+        }
+        if (address.pathname === '/api/upload-sessions/budget-upload' && options.method === 'DELETE') { deleted = true; return new Response(null, { status: 204 }); }
+        if (address.pathname === '/api/upload-sessions/budget-upload') {
+          const finished = Date.now() - began >= 200;
+          return new Response(JSON.stringify({ measuredBytes: 0, totalBytes: finished ? 1000 : 0, measurementElapsedMs: 0, finished,
+            completionReason: finished ? 'budget' : '' }));
+        }
+        return new Response('{}');
+      },
+    });
+    const pending = engine.uploadPhase(node, { ...normalized.test, warmupMs: 500, uploadDurationMs: 10000 }, normalized.performance,
+      { mode: 'manual', streams: 1, maxBytes: 1000 }, { medianMs: 0 }, new AbortController().signal);
+    await setImmediate();
+    await advance(t, 100);
+    assert.ok(ws.sockets.every(socket => socket.bufferedAmount <= 1000));
+    await advance(t, 100);
+    const result = await pending;
+    assert.equal(result.mbps, null);
+    assert.equal(result.complete, false);
+    assert.equal(result.incompleteReason, 'budget-before-measurement');
+    assert.equal(result.completionReason, 'budget');
+    assert.equal(result.measuredBytes, 0);
+    assert.equal(result.totalBytes, 1000);
+    assert.equal(result.durationMs, 0);
+    assert.equal(result.failedRequests, 0);
+    assert.equal(deleted, true);
+  });
+}
+
+test('HTTP cleanup waits for observed proxy release without changing its measured window or inventing connections', async t => {
+  mockTime(t);
+  const began = Date.now();
+  let cancelledAt = null;
+  const cleanupPolls = [];
+  const engine = new MeasurementEngine({ clock: () => Date.now(), randomFill: bytes => bytes.fill(1), fetchImpl: async (url, options) => {
+    const address = new URL(url);
+    if (address.pathname === '/api/connection-stats') {
+      if (cancelledAt !== null) cleanupPolls.push(Date.now() - began);
+      const released = cancelledAt !== null && Date.now() - cancelledAt >= 50;
+      return new Response(JSON.stringify({ activeRequests: released ? 0 : 1, activeTcpConnections: released ? 0 : 1,
+        connectionsObserved: 1, peakTcpConnections: 1, protocols: ['HTTP/1.1'], scope: 'server' }));
+    }
+    if (address.pathname !== '/api/download') return new Response('{}');
+    return new Response(new ReadableStream({ start(controller) {
+      const timer = setTimeout(() => controller.enqueue(new Uint8Array(1000)), 70);
+      options.signal.addEventListener('abort', () => { cancelledAt = Date.now(); clearTimeout(timer); controller.error(options.signal.reason); }, { once: true });
+    } }));
+  } });
+  const settings = phaseConfiguration();
+  const pending = engine.downloadPhase(node, { ...settings.test, warmupMs: 50, downloadDurationMs: 100 }, settings.performance,
+    settings.options, settings.idle, new AbortController().signal);
+  await setImmediate();
+  await advance(t, 70);
+  await advance(t, 80);
+  assert.deepEqual(cleanupPolls, [150]);
+  await advance(t, 180);
+  const result = await pending;
+  assert.deepEqual(cleanupPolls, [150, 330]);
+  assert.equal(result.connections.active, 0);
+  assert.equal(result.connections.observed, 1);
+  assert.equal(result.connections.peak, 1);
+  assert.equal(result.measuredBytes, 1000);
+  assert.equal(result.totalBytes, 1000);
+  assert.equal(result.durationMs, 100);
+  assert.equal(result.mbps, .08);
+  assert.equal(result.failedRequests, 0);
+});
+
+test('HTTP cleanup keeps real nonzero counts when its bounded six polls cannot prove release', async t => {
+  mockTime(t);
+  let calls = 0;
+  const engine = new MeasurementEngine({ clock: () => Date.now(), fetchImpl: async () => {
+    calls += 1;
+    return new Response('{"activeRequests":4,"activeTcpConnections":4,"peakTcpConnections":4,"connectionsObserved":4}');
+  } });
+  const began = Date.now();
+  const pending = engine.settleHTTPDownloadConnections(node, 'run', new AbortController().signal);
+  await setImmediate();
+  for (let index = 0; index < 5; index += 1) await advance(t, 180);
+  const snapshot = await pending;
+  assert.equal(calls, 6, 'diagnostics cannot issue an unbounded polling loop');
+  assert.equal(Date.now() - began, 900);
+  assert.equal(snapshot.activeTcpConnections, 4, 'failure to prove release must never become a fabricated zero');
+});
+
+test('a black-holed HTTP cleanup diagnostic stops at one second and reports its timeout', async t => {
+  mockTime(t);
+  let signal;
+  const engine = new MeasurementEngine({ clock: () => Date.now(), fetchImpl: (_, options) => { signal = options.signal; return abortablePending(options.signal); } });
+  const pending = engine.settleHTTPDownloadConnections(node, 'run', new AbortController().signal);
+  const rejected = assert.rejects(pending, { name: 'TimeoutError' });
+  await advance(t, 999);
+  assert.equal(signal.aborted, false);
+  await advance(t, 1);
+  await rejected;
 });

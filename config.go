@@ -37,6 +37,13 @@ type Config struct {
 	GeoIPEnabled          bool
 	ServerLocation        string
 	TrustedProxies        []netip.Prefix
+	GeoIPProvider         string
+	GeoIPDBPath           string
+	ClientNetworkLabel    string
+	ShareDBPath           string
+	ShareWriteToken       string
+	ShareRetentionHours   int
+	ShareMaxResults       int
 }
 
 func loadConfig() (Config, error) {
@@ -55,6 +62,13 @@ func loadConfig() (Config, error) {
 		TestTransport:         envDefault("TEST_TRANSPORT", "websocket"),
 		GeoIPEnabled:          true,
 		ServerLocation:        strings.TrimSpace(os.Getenv("SERVER_LOCATION")),
+		GeoIPProvider:         envDefault("GEOIP_PROVIDER", "auto"),
+		GeoIPDBPath:           strings.TrimSpace(os.Getenv("GEOIP_DB_PATH")),
+		ClientNetworkLabel:    strings.TrimSpace(os.Getenv("CLIENT_NETWORK_LABEL")),
+		ShareDBPath:           strings.TrimSpace(os.Getenv("SHARE_DB_PATH")),
+		ShareWriteToken:       strings.TrimSpace(os.Getenv("SHARE_WRITE_TOKEN")),
+		ShareRetentionHours:   168,
+		ShareMaxResults:       10000,
 	}
 	if value := os.Getenv("GEOIP_ENABLED"); value != "" {
 		var err error
@@ -65,6 +79,23 @@ func loadConfig() (Config, error) {
 	}
 	if len(config.ServerLocation) > 256 || strings.ContainsAny(config.ServerLocation, "\r\n") {
 		return Config{}, fmt.Errorf("SERVER_LOCATION must be at most 256 bytes without line breaks")
+	}
+	if config.GeoIPProvider != "auto" && config.GeoIPProvider != "online" && config.GeoIPProvider != "offline" {
+		return Config{}, fmt.Errorf("GEOIP_PROVIDER must be auto, online or offline")
+	}
+	if len(config.ClientNetworkLabel) > 256 || strings.ContainsAny(config.ClientNetworkLabel, "\r\n") {
+		return Config{}, fmt.Errorf("CLIENT_NETWORK_LABEL must be at most 256 bytes without line breaks")
+	}
+	for name, value := range map[string]string{"GEOIP_DB_PATH": config.GeoIPDBPath, "SHARE_DB_PATH": config.ShareDBPath} {
+		if len(value) > 4096 || strings.ContainsAny(value, "\x00\r\n") {
+			return Config{}, fmt.Errorf("%s must be a valid local path", name)
+		}
+	}
+	if config.GeoIPProvider == "offline" && config.GeoIPEnabled && config.GeoIPDBPath == "" {
+		return Config{}, fmt.Errorf("GEOIP_DB_PATH is required for offline GeoIP")
+	}
+	if len(config.ShareWriteToken) > 512 || strings.ContainsAny(config.ShareWriteToken, "\x00\r\n") {
+		return Config{}, fmt.Errorf("SHARE_WRITE_TOKEN must be at most 512 bytes without line breaks")
 	}
 	if value := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES")); value != "" {
 		for _, entry := range strings.Split(value, ",") {
@@ -149,6 +180,8 @@ func loadConfig() (Config, error) {
 		{"TEST_DOWNLOAD_DURATION_MS", &config.DownloadDurationMS, 1000, 60000},
 		{"TEST_UPLOAD_DURATION_MS", &config.UploadDurationMS, 1000, 60000},
 		{"TEST_WARMUP_MS", &config.WarmupMS, 0, 10000},
+		{"SHARE_RETENTION_HOURS", &config.ShareRetentionHours, 1, 8760},
+		{"SHARE_MAX_RESULTS", &config.ShareMaxResults, 128, 100000},
 	} {
 		if value := os.Getenv(setting.name); value != "" {
 			parsed, err := strconv.Atoi(value)
@@ -394,10 +427,16 @@ type testSettings struct {
 }
 
 type features struct {
-	Download      bool `json:"download"`
-	Upload        bool `json:"upload"`
-	Latency       bool `json:"latency"`
-	LoadedLatency bool `json:"loadedLatency"`
+	Download           bool `json:"download"`
+	Upload             bool `json:"upload"`
+	Latency            bool `json:"latency"`
+	LoadedLatency      bool `json:"loadedLatency"`
+	TestSelection      bool `json:"testSelection"`
+	AdaptiveDuration   bool `json:"adaptiveDuration"`
+	ByteBudget         bool `json:"byteBudget"`
+	Stability          bool `json:"stability"`
+	Sharing            bool `json:"sharing"`
+	ShareRequiresToken bool `json:"shareRequiresToken"`
 }
 
 type performanceSettings struct {
@@ -462,6 +501,6 @@ func (config Config) clientConfig(r *http.Request) (clientConfig, error) {
 			MeasurementOrigins: origins, MaxStreams: maxStreams, DefaultMode: "manual", Transport: transport, DefaultStreams: defaultStreams,
 			DownloadBlockBytes: 25 << 20, UploadBlockBytes: 25 << 20, MaxUploadBodyBytes: 1 << 30,
 		},
-		Features: features{Download: true, Upload: true, Latency: true, LoadedLatency: true},
+		Features: features{Download: true, Upload: true, Latency: true, LoadedLatency: true, TestSelection: true, AdaptiveDuration: true, ByteBudget: true, Stability: true, Sharing: config.ShareDBPath != "", ShareRequiresToken: config.ShareDBPath != "" && config.ShareWriteToken != ""},
 	}, nil
 }

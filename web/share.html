@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#ffffff">
+    <meta name="robots" content="noindex, nofollow">
+    <title>TESTSPEED · 测速结果</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/share.css">
+    <script src="/share.js" type="module"></script>
+  </head>
+  <body>
+    <header class="language-bar"><label class="visually-hidden" for="share-language">Language</label><select id="share-language" aria-label="Language"><option value="zh">中文</option><option value="en">English</option></select></header>
+    <main class="share-shell">
+      <a class="brand" href="/" aria-label="TESTSPEED"><svg class="brand-gauge" viewBox="0 0 160 100" aria-hidden="true"><path class="gauge-outer" d="M24 78a56 56 0 0 1 16.4-39.6M52 29.5a56 56 0 0 1 56 0M119.6 38.4A56 56 0 0 1 136 78"/><path class="gauge-middle" d="M36 78a44 44 0 0 1 88 0"/><path class="gauge-inner" d="M48 78a32 32 0 0 1 64 0"/><path class="gauge-needle" d="m75 75 43-43-32 51Z"/><circle class="gauge-hub" cx="80" cy="78" r="8"/><circle class="gauge-center" cx="80" cy="78" r="3"/></svg><span>TESTSPEED</span></a>
+      <h1 data-share-i18n="title">测速结果</h1>
+      <p id="share-status" class="status-message" role="status" aria-live="polite">正在读取测速结果…</p>
+      <section id="share-result" hidden aria-labelledby="share-speed-label">
+        <p id="share-speed-label" class="share-direction" data-share-i18n="download">下载</p>
+        <div id="share-transfer" class="hero-measurement share-measurement"><span id="share-download" class="hero-value is-pending">0</span><span id="share-download-unit" class="hero-unit">Mbps</span></div>
+        <div id="share-summary" class="summary-grid">
+          <div id="share-upload-summary" class="summary-item"><span data-share-i18n="upload">上传</span><div class="summary-measurement"><strong id="share-upload">—</strong><small id="share-upload-unit">Mbps</small></div></div>
+          <div class="summary-item"><span data-share-i18n="latency">空闲延迟</span><div class="summary-measurement"><strong id="share-latency">—</strong><small>ms</small></div></div>
+          <div class="summary-item"><span data-share-i18n="jitter">抖动</span><div class="summary-measurement"><strong id="share-jitter">—</strong><small>ms</small></div></div>
+        </div>
+        <dl class="share-metadata">
+          <div><dt data-share-i18n="node">测速节点</dt><dd id="share-node"></dd></div>
+          <div><dt data-share-i18n="completed">完成时间</dt><dd id="share-completed"></dd></div>
+          <div><dt data-share-i18n="type">测试项目</dt><dd id="share-type"></dd></div>
+          <div><dt data-share-i18n="policy">测量策略</dt><dd id="share-policy"></dd></div>
+          <div><dt data-share-i18n="connections">TCP 峰值 · 下载 / 上传</dt><dd id="share-connections"></dd></div>
+          <div><dt data-share-i18n="expiry">分享有效期至</dt><dd id="share-expiry"></dd></div>
+        </dl>
+        <p id="share-incomplete" class="metrics-caption" hidden></p>
+        <p class="metrics-caption share-provenance" data-share-i18n="provenance">这是客户端主动分享的测速记录，未经服务器认证；不包含客户端 IP、所在地或设备信息。</p>
+      </section>
+      <a class="more-info-button share-back" href="/" data-share-i18n="newTest">测试我的网速</a>
+      <noscript><p class="error-message">请启用 JavaScript / Please enable JavaScript.</p></noscript>
+    </main>
+    <footer class="site-footer"><a href="/deploy.html" data-share-i18n="deployment">部署教程</a><span>TESTSPEED</span></footer>
+  </body>
+</html>
