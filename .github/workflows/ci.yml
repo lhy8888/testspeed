@@ -169,7 +169,7 @@ jobs:
         run: |
           docker run --detach --name testspeed-single-port-ci --read-only --cap-drop ALL --security-opt no-new-privileges \
             --env TEST_TRANSPORT=http --env MEASUREMENT_PORTS= --env MAX_TEST_STREAMS=4 \
-            --env PUBLIC_ORIGIN=http://127.0.0.1:9490 --publish 127.0.0.1:9490:8080 testspeed:ci
+            --publish 127.0.0.1:9490:8080 testspeed:ci
           test "$(docker inspect --format '{{.Config.User}}' testspeed-single-port-ci)" = '65532:65532'
           test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' testspeed-single-port-ci)" = true
           for attempt in {1..30}; do

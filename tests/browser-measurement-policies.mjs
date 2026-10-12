@@ -97,6 +97,11 @@ try {
     await page.locator('#test-type').selectOption('full');
     await page.locator('#measurement-duration').selectOption('10000');
     assert.equal(await page.locator('#stream-count').inputValue(), String(streams));
+    if (transport === 'http') {
+      const served = await (await context.request.get(`${url}/api/config`)).json();
+      assert.ok(served.performance.measurementOrigins.every(origin => new URL(origin).origin === new URL(url).origin),
+        'HTTP fixture measurement origins bypass the TCP meter; remove the fixed upstream PUBLIC_ORIGIN from this fixture');
+    }
 
     for (const policy of ['adaptive', 'budget']) {
       const snapshotIndex = state.snapshots.length;
@@ -186,6 +191,9 @@ try {
   assert.equal(report.cases.length, 4);
   console.log('PASS WebSocket and HTTP adaptive/budget policies');
 } catch (error) {
+  const last = report.cases.at(-1);
+  const annotation = `${error.message}\n${String(error.stack || '').split('\n').slice(0, 2).join('\n')}\nLast completed policy: ${last ? `${last.transport}/${last.policy}` : 'none'}`;
+  console.error(`::error::${annotation.replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A')}`);
   const liveConnectionStats = [];
   if (active) for (const run of active.runs) {
     const response = await active.context.request.get(`${active.url}/api/connection-stats?run=${encodeURIComponent(run)}`).catch(() => null);
