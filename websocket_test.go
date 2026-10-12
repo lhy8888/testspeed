@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -145,6 +146,7 @@ func TestWebSocketUploadCountsPartialMessageAndFreezes(t *testing.T) {
 	if !websocket.IsCloseError(err, websocket.CloseNormalClosure) {
 		t.Fatalf("completed upload session close: %v", err)
 	}
+	conn.Close()
 	waitForNoMeasurements(t, handler)
 	if !frozen.Finished || frozen.MeasuredBytes != 20480 || frozen.TotalBytes != 20480 || frozen.MeasurementElapsedMS != 1000 {
 		t.Fatalf("frozen WebSocket byte result: %+v", frozen)
@@ -174,6 +176,7 @@ func TestWebSocketUploadDeadlineClosesNormally(t *testing.T) {
 		if !errors.As(err, &closeError) || closeError.Code != websocket.CloseNormalClosure || closeError.Text != "session_finished" {
 			t.Fatalf("normal upload window deadline produced abnormal closure: %v", err)
 		}
+		conn.Close()
 	}
 	waitForNoMeasurements(t, handler)
 	frozen := session.snapshot(time.Now())
@@ -201,6 +204,79 @@ func TestWebSocketEarlyDisconnectDoesNotFinishUploadSession(t *testing.T) {
 	waitForNoMeasurements(t, handler)
 	if snapshot := session.snapshot(time.Now()); snapshot.Finished || snapshot.MeasurementElapsedMS >= 1000 {
 		t.Fatalf("early disconnect was falsely marked finished: %+v", snapshot)
+	}
+}
+
+func TestWebSocketBusyUploadCutoffDeliversNormalClose(t *testing.T) {
+	handler, server := webSocketTestServer(t, 10)
+	session := handler.sessions.create(0, time.Second, time.Now())
+	defer session.stop()
+	connections := make([]*websocket.Conn, 0, 8)
+	defer func() {
+		for _, conn := range connections {
+			conn.Close()
+		}
+	}()
+	for range 8 {
+		conn, _ := dialMeasurement(t, server, "direction=upload&session="+session.id)
+		connections = append(connections, conn)
+	}
+	payload := make([]byte, 1<<20)
+	var writers sync.WaitGroup
+	for _, conn := range connections {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			for {
+				if conn.WriteMessage(websocket.BinaryMessage, payload) != nil {
+					return
+				}
+			}
+		}()
+	}
+	for _, conn := range connections {
+		_, _, err := conn.ReadMessage()
+		var closeError *websocket.CloseError
+		if !errors.As(err, &closeError) || closeError.Code != websocket.CloseNormalClosure || closeError.Text != "session_finished" {
+			t.Fatalf("busy upload cutoff lost normal close frame: %v", err)
+		}
+		conn.Close()
+	}
+	writers.Wait()
+	waitForNoMeasurements(t, handler)
+	frozen := session.snapshot(time.Now())
+	if !frozen.Finished || frozen.MeasuredBytes <= 0 || frozen.MeasuredBytes != frozen.TotalBytes || frozen.MeasurementElapsedMS != 1000 {
+		t.Fatalf("busy cutoff measurement accounting changed: %+v", frozen)
+	}
+	if after := session.snapshot(time.Now().Add(time.Second)); after.MeasuredBytes != frozen.MeasuredBytes || after.TotalBytes != frozen.TotalBytes {
+		t.Fatal("closing transport bytes entered a frozen measurement")
+	}
+}
+
+func TestWebSocketCloseDrainIsBoundedForNoncooperativePeer(t *testing.T) {
+	handler, server := webSocketTestServer(t, 2)
+	session := handler.sessions.create(0, time.Second, time.Now())
+	defer session.stop()
+	conn, _ := dialMeasurement(t, server, "direction=upload&session="+session.id)
+	defer conn.Close()
+	if err := conn.WriteMessage(websocket.BinaryMessage, make([]byte, 8192)); err != nil {
+		t.Fatal(err)
+	}
+	// Intentionally neither read the closing handshake nor close TCP.
+	started := time.Now()
+	deadline := started.Add(time.Second + webSocketCloseGrace + 500*time.Millisecond)
+	for len(handler.requests) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("noncooperative peer held a measurement slot beyond bounded close grace")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if elapsed := time.Since(started); elapsed < time.Second+webSocketCloseGrace-100*time.Millisecond {
+		t.Fatalf("unanswered close was not given its bounded grace: %s", elapsed)
+	}
+	frozen := session.snapshot(time.Now())
+	if !frozen.Finished || frozen.MeasuredBytes != 8192 || frozen.MeasurementElapsedMS != 1000 {
+		t.Fatalf("close grace extended the measured window: %+v", frozen)
 	}
 }
 
@@ -382,4 +458,30 @@ func TestTrustedWSSCreatesEightIndependentTLS13Connections(t *testing.T) {
 	if stats := session.stats.snapshot(); stats.ActiveTCPConnections != 8 || stats.PeakTCPConnections != 8 || stats.ConnectionsObserved != 8 {
 		t.Fatalf("eight WSS flows did not yield eight TCP connections: %+v", stats)
 	}
+	for _, conn := range connections {
+		if err := conn.WriteMessage(websocket.BinaryMessage, make([]byte, 8192)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deadline := time.Now().Add(time.Second)
+	for session.snapshot(time.Now()).MeasuredBytes != 8*8192 {
+		if time.Now().After(deadline) {
+			t.Fatal("TLS upload data was not measured")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Force the authoritative window to finish while TLS readers are blocked.
+	// Their timeout errors stay sticky; the closing transport must still send
+	// the WS close, TLS close_notify, and TCP FIN in that order.
+	session.snapshot(time.Now().Add(11 * time.Second))
+	for _, conn := range connections {
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		_, _, err := conn.ReadMessage()
+		var closeError *websocket.CloseError
+		if !errors.As(err, &closeError) || closeError.Code != websocket.CloseNormalClosure || closeError.Text != "session_finished" {
+			t.Fatalf("TLS normal close delivery lost: %v", err)
+		}
+		conn.Close()
+	}
+	waitForNoMeasurements(t, handler)
 }

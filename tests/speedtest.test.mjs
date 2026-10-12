@@ -119,6 +119,115 @@ test('partial idle failures retain usable probes and report failure counts', asy
   assert.deepEqual(await result, { medianMs: 0, jitterMs: 0, samples: 2, failed: 1, attempts: 3 });
 });
 
+test('fast initial RTT keeps early failures and quietly completes the original idle attempt budget', async t => {
+  mockTime(t);
+  let attempts = 0;
+  const events = [];
+  const engine = new MeasurementEngine({ clock: () => Date.now(), onUpdate: event => events.push(event), fetchImpl: async () => {
+    if (++attempts === 1) throw new TypeError('first probe failed');
+    return new Response('{}');
+  } });
+  const signal = new AbortController().signal;
+  const first = engine.idleLatency(node, 4, signal, { stopAfterFirstSuccess: true });
+  await setImmediate();
+  await advance(t, 90);
+  const initial = await first;
+  assert.deepEqual(initial, { medianMs: 0, jitterMs: null, samples: 1, failed: 1, attempts: 2 });
+  assert.equal(Date.now(), 1700000000090, 'the successful RTT starts measurement without another idle pause');
+  const announcements = events.filter(event => event.type === 'phase' || event.type === 'progress').length;
+  const final = engine.idleLatency(node, 4, signal, { seedValues: [initial.medianMs], seedFailed: initial.failed, announce: false });
+  await setImmediate();
+  await advance(t, 90);
+  assert.deepEqual(await final, { medianMs: 0, jitterMs: 0, samples: 3, failed: 1, attempts: 4 });
+  assert.equal(attempts, 4, 'the first successful probe and its failure are not repeated or discarded');
+  assert.equal(events.filter(event => event.type === 'phase' || event.type === 'progress').length, announcements);
+  assert.equal(events.at(-1).type, 'latency');
+});
+
+test('fast initial RTT preserves the full failed-probe tolerance and cannot invent a usable latency', async t => {
+  mockTime(t);
+  let attempts = 0;
+  const engine = new MeasurementEngine({ fetchImpl: async () => { attempts += 1; throw new TypeError('unreachable'); } });
+  const first = engine.idleLatency(node, 3, new AbortController().signal, { stopAfterFirstSuccess: true });
+  const rejected = assert.rejects(first, /无法连接测速节点/);
+  await setImmediate();
+  await advance(t, 90);
+  await advance(t, 90);
+  await rejected;
+  assert.equal(attempts, 3);
+});
+
+test('one unloaded RTT starts both phases before the remaining probes and waits for their cleanup', async t => {
+  mockTime(t);
+  const events = [];
+  let attempts = 0;
+  let active = '';
+  let downloadClosed = false;
+  let uploadClosed = false;
+  let finishDownload;
+  let finishUpload;
+  const downloadCleanup = new Promise(resolve => { finishDownload = resolve; });
+  const uploadCleanup = new Promise(resolve => { finishUpload = resolve; });
+  const engine = new MeasurementEngine({ onUpdate: event => events.push(event) });
+  engine.ping = async () => {
+    attempts += 1;
+    assert.equal(active, '', 'no transfer-phase probe may be labeled unloaded');
+    if (attempts > 1) assert.ok(downloadClosed && uploadClosed, 'remaining idle probes wait for all transfer cleanup');
+    return 10 + attempts;
+  };
+  engine.prepareTransport = async (normalized, options, idle) => {
+    assert.equal(attempts, 1);
+    assert.equal(idle.medianMs, 11);
+    return { config: normalized, options, transport: { transport: 'http' } };
+  };
+  const resultFor = () => ({ mbps: 1, measuredBytes: 125000, totalBytes: 125000, latency: latencyStatistics([20]) });
+  engine.downloadPhase = async (_, __, ___, ____, idle) => {
+    assert.equal(idle.medianMs, 11);
+    active = 'download'; engine.emit({ type: 'phase', phase: active });
+    await downloadCleanup;
+    active = ''; downloadClosed = true;
+    return resultFor();
+  };
+  engine.uploadPhase = async (_, __, ___, ____, idle) => {
+    assert.equal(idle.medianMs, 11, 'later idle probes must not retroactively change warm-up or handshake RTT');
+    active = 'upload'; engine.emit({ type: 'phase', phase: active });
+    await uploadCleanup;
+    active = ''; uploadClosed = true;
+    return resultFor();
+  };
+  const running = engine.run(config());
+  await setImmediate();
+  assert.equal(active, 'download');
+  assert.equal(attempts, 1);
+  finishDownload(); await setImmediate();
+  assert.equal(active, 'upload');
+  assert.equal(attempts, 1);
+  finishUpload(); await setImmediate();
+  for (let index = 0; index < 6; index += 1) await advance(t, 90);
+  const final = await running;
+  assert.equal(attempts, 8);
+  assert.deepEqual(final.latency.idle, { medianMs: 14.5, jitterMs: 1, samples: 8, failed: 0, attempts: 8 });
+  assert.deepEqual(events.filter(event => event.type === 'phase').map(event => event.phase), ['latency', 'download', 'upload']);
+  assert.equal(events.at(-1).type, 'complete');
+});
+
+test('cancelling the quiet idle tail aborts its request and never publishes a completed run', async () => {
+  let attempts = 0;
+  const events = [];
+  const engine = new MeasurementEngine({ onUpdate: event => events.push(event) });
+  engine.ping = async (_, signal) => ++attempts === 1 ? 5 : abortablePending(signal);
+  engine.prepareTransport = async (normalized, options) => ({ config: normalized, options, transport: {} });
+  engine.downloadPhase = engine.uploadPhase = async () => ({ mbps: 1, latency: latencyStatistics([]) });
+  const running = engine.run(config());
+  const rejected = assert.rejects(running, { name: 'AbortError' });
+  await setImmediate();
+  assert.equal(attempts, 2);
+  engine.cancel();
+  await rejected;
+  assert.equal(engine.controller, null);
+  assert.equal(events.some(event => event.type === 'complete'), false);
+});
+
 test('continuous download excludes warm-up and keeps a single request open until its shared deadline', async t => {
   mockTime(t);
   let downloads = 0;
@@ -150,6 +259,61 @@ test('continuous download excludes warm-up and keeps a single request open until
   assert.equal(downloads, 1);
   assert.equal(cancelled, true);
 });
+
+for (const transport of ['http', 'websocket']) {
+  test(`${transport} displays real warm-up bytes before the first ticker without contaminating speed or curves`, async t => {
+    mockTime(t);
+    const began = Date.now();
+    const events = [];
+    const timing = [[50, 1000], [75, 1000], [160, 1000], [370, 100]];
+    const ws = fakeWebSockets(socket => {
+      socket.message(new ArrayBuffer(1000));
+      for (const [delay, bytes] of timing) setTimeout(() => socket.message(new ArrayBuffer(bytes)), delay);
+    });
+    const normalized = transport === 'websocket' ? websocketConfig() : normalizeConfig(config());
+    const engine = new MeasurementEngine({
+      clock: () => Date.now(), randomFill: bytes => bytes.fill(1), webSocketFactory: ws.factory,
+      onUpdate: event => events.push({ ...event, observedAt: Date.now() - began }),
+      fetchImpl: async (url, options) => {
+        if (new URL(url).pathname !== '/api/download') return new Response('{}');
+        return new Response(new ReadableStream({ start(controller) {
+          controller.enqueue(new Uint8Array(1000));
+          const timers = timing.map(([delay, bytes]) => setTimeout(() => controller.enqueue(new Uint8Array(bytes)), delay));
+          options.signal.addEventListener('abort', () => { timers.forEach(clearTimeout); controller.error(options.signal.reason); }, { once: true });
+        } }));
+      },
+    });
+    const pending = engine.downloadPhase(node, { ...normalized.test, warmupMs: 350, downloadDurationMs: 100 }, normalized.performance, { mode: 'manual', streams: 1 }, { medianMs: 0 }, new AbortController().signal);
+    await setImmediate();
+    assert.equal(events.some(event => event.previewMbps > 0), false, 'no timer-only or zero-time fake speed may be displayed');
+    await advance(t, 50);
+    const preview = events.find(event => event.type === 'progress' && event.previewMbps > 0);
+    assert.equal(preview.observedAt, 50, 'a real positive elapsed interval need not wait for the 200 ms ticker');
+    assert.equal(preview.previewElapsedMs, 50);
+    assert.equal(preview.totalBytes, 2000);
+    assert.equal(preview.previewMbps, .32);
+    assert.equal(preview.warmingUp, true);
+    assert.equal(preview.measuredBytes, 0);
+    assert.equal(preview.mbps, 0);
+    assert.deepEqual(preview.points, []);
+    await advance(t, 25);
+    assert.equal(events.filter(event => event.type === 'progress').length, 1, 'rapid payload callbacks share a 10 Hz preview limit');
+    await advance(t, 85);
+    await advance(t, 40);
+    await advance(t, 150);
+    await advance(t, 20);
+    await advance(t, 80);
+    const measured = await pending;
+    const previews = events.filter(event => event.type === 'progress' && event.warmingUp);
+    assert.ok(previews.slice(1).every((event, index) => event.observedAt - previews[index].observedAt >= 100));
+    assert.ok(previews.every(event => event.measuredBytes === 0 && event.points.length === 0));
+    assert.equal(measured.measuredBytes, 100);
+    assert.equal(measured.totalBytes, 4100);
+    assert.equal(measured.durationMs, 100);
+    assert.equal(measured.mbps, .008, 'final throughput excludes all 4000 pre-window bytes');
+    assert.equal(measured.points.some(point => point.mbps >= .16), false, 'the preview rate must never enter the measured curve');
+  });
+}
 
 test('mixed control/data origins route ten actual streams into four control slots and six data slots', async t => {
   mockTime(t);

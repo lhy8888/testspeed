@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,8 @@ import (
 const (
 	webSocketMessageBytes          = 1 << 20
 	maxWebSocketUploadMessageBytes = 4 << 20
+	webSocketCloseGrace            = time.Second
+	maxWebSocketCloseDrainBytes    = 16 << 20
 )
 
 type socketRegistry struct {
@@ -210,21 +213,34 @@ func (server *speedServer) websocket(w http.ResponseWriter, r *http.Request) {
 
 func (server *speedServer) webSocketUpload(conn *websocket.Conn, session *uploadSession) {
 	var normalClose sync.Once
+	closeSent := false
 	closeFinished := func() {
-		normalClose.Do(func() { closeSocket(conn, websocket.CloseNormalClosure, "session_finished") })
+		normalClose.Do(func() {
+			// Keep the read side open until the sole upload reader can discard
+			// queued bytes. Closing TCP here with unread bytes can reset the
+			// connection before the peer receives this normal close frame.
+			closeSent = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "session_finished"), time.Now().Add(200*time.Millisecond)) == nil
+			_ = conn.UnderlyingConn().SetReadDeadline(time.Now())
+		})
 	}
 	stopClose := context.AfterFunc(session.ctx, closeFinished)
+	buffer := server.readBuffers.Get().(*[]byte)
+	defer server.readBuffers.Put(buffer)
 	defer func() {
 		// A socket read deadline can fire before the session timer's callback.
 		// Finish the authoritative window and send its close frame before the
 		// outer connection cleanup can turn a normal cutoff into an EOF.
 		if session.snapshot(time.Now()).Finished {
 			closeFinished()
+			if closeSent {
+				// DELETE skips the grace wait; global shutdown independently
+				// closes the registered socket and interrupts any active drain.
+				drain := server.sessions.get(session.id, time.Now()) == session
+				finishUploadWebSocketTransport(conn, *buffer, drain)
+			}
 		}
 		stopClose()
 	}()
-	buffer := server.readBuffers.Get().(*[]byte)
-	defer server.readBuffers.Put(buffer)
 	deadlineSet := false
 	for session.ctx.Err() == nil {
 		messageType, reader, err := conn.NextReader()
@@ -253,6 +269,43 @@ func (server *speedServer) webSocketUpload(conn *websocket.Conn, session *upload
 			if err != nil {
 				return
 			}
+		}
+	}
+}
+
+func finishUploadWebSocketTransport(conn *websocket.Conn, buffer []byte, drain bool) {
+	transport := conn.UnderlyingConn()
+	deadline := time.Now().Add(webSocketCloseGrace)
+	_ = transport.SetWriteDeadline(deadline)
+	_ = transport.SetReadDeadline(deadline)
+	// TCP FIN follows the written close frame. TLS sends close_notify while
+	// preserving its read side. Both let the peer observe orderly completion.
+	if halfClose, ok := transport.(interface{ CloseWrite() error }); ok {
+		_ = halfClose.CloseWrite()
+	}
+	// A timed-out tls.Conn also retains its read error. Its TLS writes are
+	// finished now, so discard remaining ciphertext from the underlying TCP
+	// connection rather than trying to resume either protocol reader.
+	if wrapped, ok := transport.(interface{ NetConn() net.Conn }); ok {
+		transport = wrapped.NetConn()
+		_ = transport.SetReadDeadline(deadline)
+		_ = transport.SetWriteDeadline(deadline)
+		if halfClose, ok := transport.(interface{ CloseWrite() error }); ok {
+			_ = halfClose.CloseWrite()
+		}
+	}
+	if !drain {
+		return
+	}
+	// Gorilla's reader retains timeout errors, so do not reuse NextReader here.
+	// Raw transport reads have one owner, fixed memory, byte/time limits, and
+	// never enter session.record: the measurement has already been frozen.
+	remaining := int64(maxWebSocketCloseDrainBytes)
+	for remaining > 0 && time.Now().Before(deadline) {
+		count, err := transport.Read(buffer[:min(int64(len(buffer)), remaining)])
+		remaining -= int64(count)
+		if err != nil {
+			return
 		}
 	}
 }

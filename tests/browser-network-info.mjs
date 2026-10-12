@@ -48,6 +48,7 @@ async function unmeasured(page) {
   for (const id of ['download-value', 'upload-value']) {
     assert.equal(await page.locator(`#${id}`).textContent(), '0');
     assert.equal(await page.locator(`#${id}`).getAttribute('data-mbps'), null, 'zero is pending, not a fabricated measurement');
+    assert.equal(await page.locator(`#${id}`).getAttribute('data-preview-mbps'), null, 'pending zero has no fictitious received-byte preview');
     const channels = await page.locator(`#${id}`).evaluate(element => getComputedStyle(element).color.match(/\d+/g).slice(0, 3).map(Number));
     assert.ok(channels.every(channel => channel >= 120), 'pending values must remain gray');
   }

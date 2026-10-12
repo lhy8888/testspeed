@@ -7,7 +7,7 @@
 适用于 amd64/ARM64、使用 systemd 的现代 Linux，需 `curl`、`tar`、`sha256sum` 和 sudo：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/lhy8888/testspeed/v0.1.2/deploy/manage.sh | sudo bash -s -- install
+curl -fsSL https://raw.githubusercontent.com/lhy8888/testspeed/v0.1.3/deploy/manage.sh | sudo bash -s -- install
 ```
 
 安装后打开 `http://服务器IP:8080`。允许客户端访问该端口；脚本不会修改防火墙或 Docker。脚本从 [GitHub Releases](https://github.com/lhy8888/testspeed/releases/latest) 下载对应架构的包，校验 SHA256，安装后检查健康状态；失败时自动恢复旧文件和服务状态。
@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/lhy8888/testspeed/v0.1.2/deploy/man
 sudo /opt/testspeed/manage.sh update
 ```
 
-更新使用最新正式版，保留现有配置和 unit，并重启服务。指定版本、回退也用同一命令，例如 `sudo /opt/testspeed/manage.sh update v0.1.2`。首次安装也可在 `install` 后指定版本。旧版包缺少管理脚本时，更新保留当前已安装的管理脚本；初次安装应选择 v0.1.1 或更新版本。
+更新使用最新正式版，保留现有配置和 unit，并重启服务。指定版本、回退也用同一命令，例如 `sudo /opt/testspeed/manage.sh update v0.1.3`。首次安装也可在 `install` 后指定版本。旧版包缺少管理脚本时，更新保留当前已安装的管理脚本；初次安装应选择 v0.1.1 或更新版本。
 
 | 操作 | 命令 |
 | --- | --- |
@@ -129,14 +129,14 @@ ARM64 将文件名中的 `amd64` 换为 `arm64`。脚本再次校验包，不访
 官方 Docker Engine：
 
 ```sh
-sudo git clone --depth 1 --branch v0.1.2 https://github.com/lhy8888/testspeed.git /opt/testspeed-src
+sudo git clone --depth 1 --branch v0.1.3 https://github.com/lhy8888/testspeed.git /opt/testspeed-src
 sudo docker compose --project-directory /opt/testspeed-src -f /opt/testspeed-src/compose.yaml up --build --detach
 ```
 
 Docker Snap 使用其可访问的公共目录，并添加 Snap override：
 
 ```sh
-sudo git clone --depth 1 --branch v0.1.2 https://github.com/lhy8888/testspeed.git /var/snap/docker/common/testspeed-src
+sudo git clone --depth 1 --branch v0.1.3 https://github.com/lhy8888/testspeed.git /var/snap/docker/common/testspeed-src
 sudo docker compose --project-directory /var/snap/docker/common/testspeed-src -f /var/snap/docker/common/testspeed-src/compose.yaml -f /var/snap/docker/common/testspeed-src/compose.snap.yaml up --build --detach
 ```
 
@@ -157,7 +157,7 @@ sudo cp -a /opt/testspeed-src/. /var/snap/docker/common/testspeed-src/
 
 ```sh
 sudo git -C /opt/testspeed-src fetch --tags origin
-sudo git -C /opt/testspeed-src checkout v0.1.2
+sudo git -C /opt/testspeed-src checkout v0.1.3
 sudo docker compose --project-directory /opt/testspeed-src -f /opt/testspeed-src/compose.yaml up --build --detach
 sudo docker compose --project-directory /opt/testspeed-src -f /opt/testspeed-src/compose.yaml logs --follow
 ```

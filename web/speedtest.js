@@ -190,6 +190,7 @@ class TransferState {
     this.previousTarget = this.target;
     this.converged = false;
     this.lastTick = this.began;
+    this.lastProgressEmittedAt = -Infinity;
     this.lagTicks = 0;
     this.startupAllowanceMs = Math.min(15000, Math.max(5000, 8 * this.rttMs));
   }
@@ -279,13 +280,28 @@ class TransferState {
       this.lastPointTime = this.elapsedMs;
     }
     this.adapt(now, launch);
+    this.emitProgress(now, rate);
+  }
+
+  emitProgress(now, instantaneousMbps = 0) {
+    // Warm-up previews use received bytes and actual wall-clock time. Share a
+    // 10 Hz limit between the ticker and payload callbacks; no preview enters
+    // the measured window, curve, or final throughput calculation.
+    if (this.elapsedMs === 0 && now - this.lastProgressEmittedAt < 100) return;
+    this.lastProgressEmittedAt = now;
+    const previewElapsedMs = Math.max(0, now - this.began);
     this.engine.emit({
       type: "progress", phase: this.kind, progress: this.elapsedMs / this.durationMs, warmingUp: this.elapsedMs === 0,
-      mbps: toMbps(this.measuredBytes, this.elapsedMs), instantaneousMbps: rate,
+      mbps: toMbps(this.measuredBytes, this.elapsedMs), instantaneousMbps,
+      previewMbps: toMbps(this.totalBytes, previewElapsedMs), previewElapsedMs,
       measuredBytes: this.measuredBytes, totalBytes: this.totalBytes,
       remainingMs: Math.max(0, this.durationMs - this.elapsedMs + (this.elapsedMs === 0 ? this.warmupMs : 0)),
       points: [...this.points], ...this.metadata(),
     });
+  }
+
+  emitPreview(now) {
+    if (this.kind === "download" && now < this.measurementStart && now > this.began && this.totalBytes > 0) this.emitProgress(now);
   }
 
   async loadedLatency() {
@@ -365,19 +381,25 @@ export class MeasurementEngine {
     await this.json(this.url(node.baseUrl, "ping"), {}, signal, Math.min(15000, Math.max(5000, 6 * idleRTT)));
     return this.clock() - start;
   }
-  async idleLatency(node, sampleCount, signal) {
-    const values = [];
-    let failed = 0;
-    this.emit({ type: "phase", phase: "latency" });
-    for (let index = 0; index < sampleCount; index += 1) {
+  async idleLatency(node, sampleCount, signal, options = {}) {
+    const values = [...(options.seedValues || [])];
+    let failed = options.seedFailed || 0;
+    const announce = options.announce !== false;
+    if (announce) this.emit({ type: "phase", phase: "latency" });
+    let emitted = false;
+    for (let index = values.length + failed; index < sampleCount; index += 1) {
       try { values.push(await this.ping(node, signal)); }
       catch (error) { if (signal.aborted) throw signal.reason || error; failed += 1; }
       this.emit({ type: "latency", phase: "idle", stats: latencyStatistics(values, failed) });
-      this.emit({ type: "progress", phase: "latency", progress: (index + 1) / sampleCount });
+      emitted = true;
+      if (announce) this.emit({ type: "progress", phase: "latency", progress: (index + 1) / sampleCount });
+      if (options.stopAfterFirstSuccess && values.length) break;
       if (index < sampleCount - 1) await pause(90, signal);
     }
     if (!values.length) throw new Error("无法连接测速节点，请检查网络或稍后重试。");
-    return latencyStatistics(values, failed);
+    const stats = latencyStatistics(values, failed);
+    if (!emitted) this.emit({ type: "latency", phase: "idle", stats });
+    return stats;
   }
 
   async probeOrigin(baseUrl, signal, timeoutMs) {
@@ -567,6 +589,7 @@ export class MeasurementEngine {
               job.received ||= bytes > 0;
               state.totalBytes += bytes;
               if (now >= state.measurementStart && now <= state.ends) state.measuredBytes += bytes;
+              state.emitPreview(now);
               feedbackBytes += bytes;
               failures = 0;
               if (now < state.ends && (first || now - feedbackTime >= 250)) {
@@ -764,6 +787,7 @@ export class MeasurementEngine {
               job.received = value.byteLength > 0 || job.received;
               state.totalBytes += value.byteLength;
               if (now >= state.measurementStart && now <= state.ends) state.measuredBytes += value.byteLength;
+              state.emitPreview(now);
               failures = 0;
               // A continuously ready reader must still let timers and cancellation messages run.
               if (this.yielding || now - this.lastTaskYield >= 8) await this.yieldReaders();
@@ -935,14 +959,21 @@ export class MeasurementEngine {
     this.controller = controller;
     try {
       const startedAt = new Date().toISOString();
-      const idle = await this.idleLatency(node, normalized.test.pingSamples, controller.signal);
-      const prepared = await this.prepareTransport(normalized, options, idle, controller.signal);
+      // One successful unloaded request is sufficient to choose RTT-aware
+      // transport and warm-up budgets. Keep all failures and finish the same
+      // total idle-probe budget only after both transfer phases clean up.
+      const initialIdle = await this.idleLatency(node, normalized.test.pingSamples, controller.signal, { stopAfterFirstSuccess: true });
+      const prepared = await this.prepareTransport(normalized, options, initialIdle, controller.signal);
       ensureActive(controller.signal);
       const effective = prepared.config;
       const effectiveNode = effective.nodes[0];
-      const download = await this.downloadPhase(effectiveNode, effective.test, effective.performance, prepared.options, idle, controller.signal);
+      const download = await this.downloadPhase(effectiveNode, effective.test, effective.performance, prepared.options, initialIdle, controller.signal);
       if (controller.signal.aborted) throw controller.signal.reason || abortError();
-      const upload = await this.uploadPhase(effectiveNode, effective.test, effective.performance, prepared.options, idle, controller.signal);
+      const upload = await this.uploadPhase(effectiveNode, effective.test, effective.performance, prepared.options, initialIdle, controller.signal);
+      if (controller.signal.aborted) throw controller.signal.reason || abortError();
+      const idle = await this.idleLatency(effectiveNode, normalized.test.pingSamples, controller.signal, {
+        seedValues: [initialIdle.medianMs], seedFailed: initialIdle.failed || 0, announce: false,
+      });
       if (controller.signal.aborted) throw controller.signal.reason || abortError();
       const result = {
         startedAt, completedAt: new Date().toISOString(), node: effectiveNode, mode: options.mode, transport: prepared.transport,

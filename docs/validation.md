@@ -1,5 +1,20 @@
 # 验证记录
 
+## v0.1.3：更快的真实速度显示与正常上传关闭
+
+2026-10-12 完成以下候选版本本地检查。完整跨平台、容器与浏览器 CI 结果见 [GitHub Actions](https://github.com/lhy8888/testspeed/actions/workflows/ci.yml) 对应提交，正式安装包校验与部署另外使用实际下载的发布资产。
+
+- `go test -race ./...` 通过（8.543 秒），`go vet ./...` 通过。新增持续 1 MiB 上传的 8 路正常截止、最多 1 秒关闭宽限及冻结字节、可信 TLS 正常关闭测试；保留真正提前断连、DELETE、30 路连接和服务关闭测试。
+- `node --test tests/*.test.mjs` 68 项全部通过。快启动保持首个延迟失败后的重试预算、总计 8 次空闲尝试、传输全部清理后补齐采样和取消；HTTP/WebSocket 预热预览只使用实际收到的字节，零时间不产生虚假速度，预热字节不进入最终结果或正式曲线。
+- Playwright 1.64.0 的完整界面测试通过。应用延迟模型为 212ms，真实 TCP 传输预算为下载 120Mbps / 上传 60Mbps、按 30 路分配。默认 8 路开始后 754.2ms 显示灰色真实预热速度，手动 30 路重测为 666.1ms，均在正式计量前、且没有正式 `data-mbps`；原 8 次串行空闲探测仅采样等待就需约 2326ms。
+- 默认 8 路测得下载 31.923Mbps / 上传 15.988Mbps，手动 30 路为 107.771Mbps / 54.355Mbps，失败率均为 0，实际 TCP 峰值 8 / 30、结束归零。下载最终值先于上传显示，上传预热保持 0；末尾补齐空闲样本但不回跳阶段，语言和 320 像素布局检查保持通过。
+- 不限速 raw CDP 检查不启用 Network 或观察 WebSocket 二进制帧。默认 8 路下载 7.853Gbps、上传 6.085Gbps，8 条上传连接全部以 `1000/session_finished` 正常结束，没有 1006；下载、上传及所有 ping 的失败计数均为 0，TCP 峰值 8、结束为 0，实际完整空闲采样为 8 次。Logo、灰色 0、真实预热预览、独立网络信息、语言持久化、320 像素布局和 13 个教程复制命令通过。该速度是本机浏览器回环路径，不能代表网卡容量。
+- 不限速手动 30 路检查也通过：下载 6.769Gbps、上传 6.089Gbps，30 条上传连接全部正常 `1000/session_finished`，无 1006；所有测量和 ping 失败计数为 0，实际 TCP 峰值 30、结束为 0。两轮 raw CDP 检查使用独立浏览器，无额外网络预算，未观察二进制帧。
+
+该模型延迟 HTTP ping 响应和初始 TCP 转发，**不是物理 TCP ACK RTT 模拟**。上述预算与速度用于验证流程、连接数和计量，不能代表网卡或服务器容量。原 v0.1.2 正式包的不限速本机浏览器检查暴露了上传截止时的 TCP 复位问题：下载与所有 ping 成功，部分正常截止连接返回 1006；旧失败工件保留在 `/workspace/shared/testspeed-v012-release-artifact-diagnostic/`。v0.1.3 修复关闭帧交付，不隐藏这些失败、不放宽失败率断言。
+
+当前工件：`/workspace/shared/testspeed-v013-validation/unit-tests.log`、`/workspace/shared/testspeed-v013-candidate-ui/ui-report.json`、`/workspace/shared/testspeed-v013-candidate-unrestricted-eight/` 和 `/workspace/shared/testspeed-v013-candidate-unrestricted-thirty/`，包含对应报告、关闭事件摘要与截图。
+
 ## v0.1.2：IP 所在地、初始状态与新标识
 
 2026-10-12 在当前 Linux 云环境对候选版本完成以下检查。运行时沿用 Go 1.27.2、Node.js 26.11.1、Playwright 1.64.0 和 Chromium 154。

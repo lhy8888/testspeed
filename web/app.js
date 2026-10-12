@@ -78,13 +78,15 @@ const formatTraffic = (bytes) => {
   return `${(bytes / 1024).toFixed(0)} KB`;
 };
 
-function setSpeed(kind, value) {
+function setSpeed(kind, value, { preview = false } = {}) {
   const target = kind === "download" ? ui.download : ui.upload;
   const measured = Number.isFinite(value) && value >= 0;
   target.textContent = measured ? speedNumber(value) : "0";
   target.classList.toggle("is-pending", !measured);
-  if (measured) target.dataset.mbps = String(value);
+  if (measured && !preview) target.dataset.mbps = String(value);
   else delete target.dataset.mbps;
+  if (measured && preview) target.dataset.previewMbps = String(value);
+  else delete target.dataset.previewMbps;
   (kind === "download" ? ui.downloadUnit : ui.uploadUnit).textContent = speedUnit(value);
   if (kind === "download") {
     target.classList.toggle("is-settled", measured && downloadComplete);
@@ -93,7 +95,7 @@ function setSpeed(kind, value) {
   }
 }
 
-const setDownload = (value) => setSpeed("download", value);
+const setDownload = (value, options) => setSpeed("download", value, options);
 
 function networkText(value) {
   return typeof value === "string" ? value.trim().slice(0, 256) : "";
@@ -445,8 +447,9 @@ function onUpdate(update) {
       const isDownload = update.phase === "download";
       updateDiagnostics(update);
       setProgress((isDownload ? .05 : .52) + update.progress * .47);
-      if (!update.warmingUp) {
-        if (isDownload && !downloadComplete) setDownload(update.measuredBytes > 0 ? update.mbps : null);
+      if (isDownload && !downloadComplete) {
+        if (update.warmingUp && update.totalBytes > 0 && update.previewMbps > 0) setDownload(update.previewMbps, { preview: true });
+        else if (!update.warmingUp) setDownload(update.measuredBytes > 0 ? update.mbps : null);
       }
       if (isDownload) downloadBytes = update.totalBytes;
       else uploadBytes = update.totalBytes;
