@@ -260,6 +260,11 @@ func (server *speedServer) webSocketUpload(conn *websocket.Conn, session *upload
 				}
 				if !deadlineSet {
 					_ = conn.SetReadDeadline(end)
+					// A budget can finish on this very first body read. Preserve
+					// its immediate close deadline rather than reopening reads.
+					if session.ctx.Err() != nil {
+						_ = conn.SetReadDeadline(time.Now())
+					}
 					deadlineSet = true
 				}
 			}

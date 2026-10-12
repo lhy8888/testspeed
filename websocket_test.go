@@ -207,6 +207,89 @@ func TestWebSocketEarlyDisconnectDoesNotFinishUploadSession(t *testing.T) {
 	}
 }
 
+func TestWebSocketWarmupBudgetClosesEightBusySocketsNormally(t *testing.T) {
+	handler, server := webSocketTestServer(t, 10)
+	const budget = 128 << 10
+	session := handler.sessions.create(1500*time.Millisecond, 10*time.Second, time.Now(), budget)
+	defer session.stop()
+	connections := make([]*websocket.Conn, 0, 8)
+	defer func() {
+		for _, conn := range connections {
+			conn.Close()
+		}
+	}()
+	for range 8 {
+		conn, _ := dialMeasurement(t, server, "direction=upload&session="+session.id)
+		connections = append(connections, conn)
+	}
+	var writers sync.WaitGroup
+	payload := make([]byte, 1<<20)
+	for _, conn := range connections {
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			for conn.WriteMessage(websocket.BinaryMessage, payload) == nil {
+			}
+		}()
+	}
+	for _, conn := range connections {
+		_, _, err := conn.ReadMessage()
+		var closeError *websocket.CloseError
+		if !errors.As(err, &closeError) || closeError.Code != websocket.CloseNormalClosure || closeError.Text != "session_finished" {
+			t.Fatalf("early warmup budget lost the normal WS close: %v", err)
+		}
+		conn.Close()
+	}
+	writers.Wait()
+	waitForNoMeasurements(t, handler)
+	frozen := session.snapshot(time.Now())
+	if !frozen.Finished || frozen.CompletionReason != "budget" || frozen.TotalBytes < budget || frozen.TotalBytes > budget+8*(64<<10) || frozen.MeasuredBytes != 0 || frozen.MeasurementElapsedMS != 0 || frozen.Mbps != 0 || frozen.PeakTCPConnections != 8 || frozen.ActiveTCPConnections != 0 {
+		t.Fatalf("early budget result fabricated a speed or lost actual receive bytes: %+v", frozen)
+	}
+	if after := session.snapshot(time.Now().Add(time.Minute)); after.TotalBytes != frozen.TotalBytes || after.MeasuredBytes != frozen.MeasuredBytes || after.MeasurementElapsedMS != frozen.MeasurementElapsedMS || after.CompletionReason != frozen.CompletionReason {
+		t.Fatalf("bounded close drain changed the completed budget: before=%+v after=%+v", frozen, after)
+	}
+}
+
+func TestWebSocketStableFinishClosesNormallyWithoutWaitingForFullDuration(t *testing.T) {
+	handler, server := webSocketTestServer(t, 2)
+	session := handler.sessions.create(0, 10*time.Second, time.Now())
+	defer session.stop()
+	// A fake clock moves the first server read six seconds earlier. Real socket
+	// data below must still be consumed and counted before the endpoint finishes.
+	session.record(100, time.Now().Add(-6*time.Second))
+	conn, _ := dialMeasurement(t, server, "direction=upload&session="+session.id)
+	defer conn.Close()
+	if err := conn.WriteMessage(websocket.BinaryMessage, make([]byte, 8192)); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for session.snapshot(time.Now()).MeasuredBytes != 8292 {
+		if time.Now().After(deadline) {
+			t.Fatal("real socket upload data was not consumed before stable finish")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	w := request(handler, http.MethodPost, "/api/upload-sessions/"+session.id+"/finish", strings.NewReader(`{"reason":"stable"}`))
+	if w.Code != http.StatusOK {
+		t.Fatalf("stable completion endpoint failed: %d %s", w.Code, w.Body)
+	}
+	_, _, err := conn.ReadMessage()
+	var closeError *websocket.CloseError
+	if !errors.As(err, &closeError) || closeError.Code != websocket.CloseNormalClosure || closeError.Text != "session_finished" {
+		t.Fatalf("stable finish lost the normal WS close: %v", err)
+	}
+	conn.Close()
+	waitForNoMeasurements(t, handler)
+	frozen := session.snapshot(time.Now())
+	if !frozen.Finished || frozen.CompletionReason != "stable" || frozen.MeasuredBytes != 8292 || frozen.MeasurementElapsedMS < 6000 || frozen.MeasurementElapsedMS >= 10000 || frozen.ActiveTCPConnections != 0 {
+		t.Fatalf("stable WS finish waited for full duration or changed real byte count: %+v", frozen)
+	}
+	if after := session.snapshot(time.Now().Add(time.Minute)); after.MeasurementElapsedMS != frozen.MeasurementElapsedMS || after.Mbps != frozen.Mbps || after.TotalBytes != frozen.TotalBytes {
+		t.Fatalf("stable WS result changed during or after close drain: before=%+v after=%+v", frozen, after)
+	}
+}
+
 func TestWebSocketBusyUploadCutoffDeliversNormalClose(t *testing.T) {
 	handler, server := webSocketTestServer(t, 10)
 	session := handler.sessions.create(0, time.Second, time.Now())
