@@ -14,6 +14,23 @@ const errors = [];
 let page;
 try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, locale: 'en-US' });
+  // Observe only the engine's small result/latency messages. WebSocket binary
+  // frame payloads are never added to diagnostics or retained by this test.
+  await context.addInitScript(() => {
+    const NativeWorker = window.Worker;
+    window.__measurementResults = [];
+    window.Worker = class extends NativeWorker {
+      constructor(...args) {
+        super(...args);
+        this.addEventListener('message', ({ data }) => {
+          if (data.type === 'result' || data.type === 'error'
+            || (data.type === 'update' && ['phase-complete', 'latency', 'complete'].includes(data.update?.type))) {
+            window.__measurementResults.push(data);
+          }
+        });
+      }
+    };
+  });
   page = await context.newPage();
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(fixture.url, { waitUntil: 'networkidle' });
@@ -123,7 +140,15 @@ try {
   console.log('PASS minimal multilingual UI', JSON.stringify(result));
 } catch (error) {
   if (page && !page.isClosed()) {
-    console.error('FAIL minimal UI', JSON.stringify(await page.evaluate(() => ({ phase: document.querySelector('#phase-label').textContent, phaseKey: document.querySelector('#phase-label').dataset.phase, status: document.querySelector('#status-message').textContent, error: document.querySelector('#error-message').textContent, language: document.documentElement.lang })).catch(() => null)));
+    const diagnostics = {
+      failure: error.message,
+      page: await page.evaluate(() => ({ phase: document.querySelector('#phase-label').textContent, phaseKey: document.querySelector('#phase-label').dataset.phase, status: document.querySelector('#status-message').textContent, error: document.querySelector('#error-message').textContent, language: document.documentElement.lang, engineMessages: window.__measurementResults })).catch(() => null),
+      metrics: await readMetrics(page).catch(() => null),
+      proxy: fixture.stats,
+      errors,
+    };
+    await writeFile(join(artifacts, 'ui-failure-report.json'), JSON.stringify(diagnostics, null, 2) + '\n');
+    console.error('FAIL minimal UI', JSON.stringify({ failure: diagnostics.failure, metrics: diagnostics.metrics, errors, page: { ...diagnostics.page, engineMessages: undefined } }));
     await page.screenshot({ path: join(artifacts, 'ui-failure.png'), fullPage: true }).catch(() => {});
   }
   throw error;

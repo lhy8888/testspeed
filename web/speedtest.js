@@ -99,6 +99,14 @@ export function chooseWebSocketMessageBytes(bytes, elapsedMs) {
   return 2 ** Math.floor(Math.log2(desired));
 }
 
+export function chooseWebSocketHandshakeTimeout(streams, rttMs = 0) {
+  const concurrent = Math.max(1, Math.min(30, Math.ceil(Number.isFinite(streams) ? streams : 1)));
+  const rtt = Number.isFinite(rttMs) ? Math.max(0, rttMs) : 0;
+  // Browsers queue simultaneous upgrades; allow one bounded budget per group of six.
+  const queueBudget = 5000 + (Math.ceil(concurrent / 6) - 1) * 1500;
+  return Math.min(30000, Math.ceil(Math.max(queueBudget, 6 * rtt)));
+}
+
 export function createUploadBody(baseBlob, bodyBytes) {
   if (!(baseBlob instanceof Blob) || baseBlob.size < 1 || !Number.isSafeInteger(bodyBytes) || bodyBytes < 1) throw new Error("上传数据块无效。");
   const parts = Array(Math.floor(bodyBytes / baseBlob.size)).fill(baseBlob);
@@ -572,7 +580,7 @@ export class MeasurementEngine {
                 feedbackBytes = 0;
               }
             },
-          }, Math.max(5000, 6 * state.rttMs));
+          }, chooseWebSocketHandshakeTimeout(state.target, state.rttMs));
         } catch (error) {
           if (job.controller.signal.aborted) { if (!job.received) state.cancelledRequests += 1; break; }
           state.failedRequests += 1;
@@ -637,7 +645,7 @@ export class MeasurementEngine {
               if (code === 1000 && reason === "session_finished") { state.windowFinished = true; return true; }
               return false;
             },
-          }, timeoutMs);
+          }, chooseWebSocketHandshakeTimeout(state.target, state.rttMs));
           if (state.windowFinished) break;
         } catch (error) {
           if (job.controller.signal.aborted) { state.cancelledRequests += 1; break; }

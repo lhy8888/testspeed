@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { setImmediate } from 'node:timers/promises';
-import { chooseConcurrencyTarget, chooseWebSocketMessageBytes, createUploadBody, estimateBDPBytes, latencyStatistics, loadConfig, MeasurementEngine, normalizeConfig, normalizeOptions, SpeedTest, toMbps } from '../web/speedtest.js';
+import { chooseConcurrencyTarget, chooseWebSocketHandshakeTimeout, chooseWebSocketMessageBytes, createUploadBody, estimateBDPBytes, latencyStatistics, loadConfig, MeasurementEngine, normalizeConfig, normalizeOptions, SpeedTest, toMbps } from '../web/speedtest.js';
 
 const config = () => ({ protocolVersion: 2, nodes: [{ id: 'local', name: '本地节点', baseUrl: '' }], performance: { measurementOrigins: [8081, 8082, 8083, 8084].map(port => `http://localhost:${port}/`), maxStreams: 24 }, test: { warmupMs: 0 } });
 const node = { id: 'local', name: '本地节点', baseUrl: 'http://localhost/' };
@@ -610,7 +610,7 @@ function websocketConfig() {
   return normalizeConfig({ ...config(), performance: { transport: 'websocket', measurementOrigins: ['/'], defaultMode: 'manual', defaultStreams: 8, maxStreams: 30 } });
 }
 
-function fakeWebSockets(onReady = () => {}, { closeWaitsForServer = false, readyMessage } = {}) {
+function fakeWebSockets(onReady = () => {}, { closeWaitsForServer = false, readyMessage, readyDelayMs = 0 } = {}) {
   const sockets = [];
   const factory = url => {
     const socket = {
@@ -629,11 +629,17 @@ function fakeWebSockets(onReady = () => {}, { closeWaitsForServer = false, ready
       },
     };
     sockets.push(socket);
-    queueMicrotask(() => {
+    const deliverReady = () => {
+      if (socket.readyState !== 0) return;
       socket.readyState = 1;
       socket.message(JSON.stringify(readyMessage || { type: 'ready', connectionId: `tcp-${sockets.indexOf(socket)}`, protocol: 'HTTP/1.1' }));
       onReady(socket, new URL(url));
-    });
+    };
+    const delay = typeof readyDelayMs === 'function' ? readyDelayMs(sockets.length - 1) : readyDelayMs;
+    if (delay !== null) {
+      if (delay > 0) setTimeout(deliverReady, delay);
+      else queueMicrotask(deliverReady);
+    }
     return socket;
   };
   return { sockets, factory };
@@ -655,6 +661,129 @@ test('WebSocket frame feedback scales from slow kilobit messages to one MiB with
   assert.equal(chooseWebSocketMessageBytes(4096, 1), 65536);
   assert.equal(chooseWebSocketMessageBytes(100000000, 1), 1048576);
   for (const bytes of [0, 1024, 1048576]) assert.equal(Math.log2(chooseWebSocketMessageBytes(bytes, 40)) % 1, 0);
+});
+
+test('WebSocket handshake budget scales to actual concurrency and RTT while remaining capped', () => {
+  assert.equal(chooseWebSocketHandshakeTimeout(1), 5000);
+  assert.equal(chooseWebSocketHandshakeTimeout(6), 5000);
+  assert.equal(chooseWebSocketHandshakeTimeout(8), 6500);
+  assert.equal(chooseWebSocketHandshakeTimeout(30, 80), 11000);
+  assert.equal(chooseWebSocketHandshakeTimeout(30, 2500), 15000);
+  assert.equal(chooseWebSocketHandshakeTimeout(30, 10000), 30000);
+  assert.equal(chooseWebSocketHandshakeTimeout(30, 2500.1), 15001);
+  assert.equal(chooseWebSocketHandshakeTimeout(NaN, Infinity), 5000);
+});
+
+test('thirty downloads tolerate queued ready messages beyond five seconds without changing their byte window', async t => {
+  mockTime(t);
+  const ws = fakeWebSockets(socket => {
+    if (ws.sockets.indexOf(socket) < 28) {
+      socket.message(new ArrayBuffer(100));
+      setTimeout(() => socket.message(new ArrayBuffer(1000)), 70);
+    } else socket.message(new ArrayBuffer(1000));
+  }, { readyDelayMs: index => index < 28 ? 0 : 5500 });
+  const normalized = websocketConfig();
+  const engine = new MeasurementEngine({ clock: () => Date.now(), webSocketFactory: ws.factory, randomFill: bytes => bytes.fill(1), fetchImpl: async () => new Response('{}') });
+  const pending = engine.downloadPhase(node, { ...normalized.test, warmupMs: 50, downloadDurationMs: 10000 }, normalized.performance, { mode: 'manual', streams: 30 }, { medianMs: 0 }, new AbortController().signal);
+  await setImmediate();
+  await advance(t, 70);
+  await advance(t, 4931);
+  assert.equal(ws.sockets.length, 30);
+  assert.equal(ws.sockets.slice(28).every(socket => socket.readyState === 0 && socket.closeCalls === 0), true, 'queued upgrades remain pending beyond the old five-second deadline');
+  await advance(t, 499);
+  assert.equal(ws.sockets.every(socket => socket.readyState === 1), true);
+  await advance(t, 4550);
+  const measured = await pending;
+  assert.equal(Date.now(), 1700000010050);
+  assert.equal(measured.durationMs, 10000);
+  assert.equal(measured.measuredBytes, 30000);
+  assert.equal(measured.totalBytes, 32800);
+  assert.equal(measured.mbps, .024);
+  assert.equal(measured.attemptedRequests, 30);
+  assert.equal(measured.failedRequests, 0);
+  assert.equal(measured.peakStreams, 30);
+  assert.equal(new Set(ws.sockets.map(socket => new URL(socket.url).searchParams.get('run'))).size, 1);
+  assert.equal(ws.sockets.every(socket => socket.closeCalls === 1), true);
+});
+
+test('thirty uploads use the same queue-aware handshake budget and retain authoritative server bytes', async t => {
+  mockTime(t);
+  const ws = fakeWebSockets(() => {}, { readyDelayMs: index => index < 28 ? 0 : 5500 });
+  const normalized = websocketConfig();
+  const engine = new MeasurementEngine({ clock: () => Date.now(), taskYield: () => setImmediate(), webSocketFactory: ws.factory, randomFill: bytes => bytes.fill(1), fetchImpl: async (url, options) => {
+    const path = new URL(url).pathname;
+    if (path === '/api/upload-sessions') return new Response('{"id":"queued-upgrade"}', { status: 201 });
+    if (path === '/api/upload-sessions/queued-upgrade' && options.method === 'DELETE') return new Response(null, { status: 204 });
+    if (path === '/api/upload-sessions/queued-upgrade') {
+      const finished = Date.now() >= 1700000010000;
+      return new Response(JSON.stringify({ measuredBytes: finished ? 1000 : 0, totalBytes: finished ? 1000 : 0, measurementElapsedMs: finished ? 10000 : 0, finished }));
+    }
+    return new Response('{}');
+  } });
+  const pending = engine.uploadPhase(node, { ...normalized.test, uploadDurationMs: 10000 }, { ...normalized.performance, uploadBlockBytes: 65536 }, { mode: 'manual', streams: 30 }, { medianMs: 0 }, new AbortController().signal);
+  await setImmediate();
+  await advance(t, 5001);
+  assert.equal(ws.sockets.length, 30);
+  assert.equal(ws.sockets.slice(28).every(socket => socket.readyState === 0 && socket.closeCalls === 0), true);
+  await advance(t, 499);
+  assert.equal(ws.sockets.every(socket => socket.readyState === 1), true);
+  await advance(t, 4500);
+  const measured = await pending;
+  assert.equal(measured.durationMs, 10000);
+  assert.equal(measured.measuredBytes, 1000);
+  assert.equal(measured.mbps, .0008);
+  assert.equal(measured.failedRequests, 0);
+  assert.equal(measured.peakStreams, 30);
+  assert.equal(ws.sockets.length, 30, 'healthy queued connections must not be retried');
+  assert.equal(ws.sockets.every(socket => socket.closeCalls === 1), true);
+});
+
+test('unready upgrades still time out at their bounded deadline and cancellation skips the remaining wait', async t => {
+  mockTime(t);
+  const ws = fakeWebSockets(() => {}, { readyDelayMs: null });
+  const engine = new MeasurementEngine({ webSocketFactory: ws.factory });
+  const timeout = chooseWebSocketHandshakeTimeout(30, 80);
+  let observedReady = 0;
+  let observedBytes = 0;
+  const callbacks = { onReady: () => { observedReady += 1; }, onBinary: (_, bytes) => { observedBytes += bytes; } };
+  const blackhole = engine.socketExchange(node.baseUrl, { direction: 'download', run: 'blackhole' }, new AbortController().signal, callbacks, timeout);
+  const rejected = assert.rejects(blackhole, /WebSocket.*超时/);
+  await advance(t, 10999);
+  assert.equal(ws.sockets[0].closeCalls, 0);
+  await advance(t, 1);
+  await rejected;
+  assert.equal(ws.sockets[0].closeCalls, 1);
+  const controller = new AbortController();
+  const cancelled = engine.socketExchange(node.baseUrl, { direction: 'upload', session: 'cancelled' }, controller.signal, callbacks, timeout);
+  const stopped = assert.rejects(cancelled, { name: 'AbortError' });
+  await advance(t, 1);
+  controller.abort(new DOMException('cancelled', 'AbortError'));
+  await stopped;
+  assert.equal(Date.now(), 1700000011001, 'cancellation does not wait for the extended handshake timer');
+  assert.equal(ws.sockets[1].closeCalls, 1);
+  assert.equal(observedReady, 0);
+  assert.equal(observedBytes, 0);
+});
+
+test('a genuinely timed-out WebSocket remains a failed request even when its retry later succeeds', async t => {
+  mockTime(t);
+  const ws = fakeWebSockets(socket => socket.message(new ArrayBuffer(1000)), { readyDelayMs: index => index === 0 ? null : 0 });
+  const normalized = websocketConfig();
+  const engine = new MeasurementEngine({ clock: () => Date.now(), webSocketFactory: ws.factory, randomFill: bytes => bytes.fill(1), fetchImpl: async () => new Response('{}') });
+  const pending = engine.downloadPhase(node, { ...normalized.test, downloadDurationMs: 10000 }, normalized.performance, { mode: 'manual', streams: 1 }, { medianMs: 0 }, new AbortController().signal);
+  await setImmediate();
+  await advance(t, 5000);
+  assert.equal(ws.sockets[0].closeCalls, 1);
+  await advance(t, 180);
+  assert.equal(ws.sockets.length, 2);
+  await advance(t, 4820);
+  const measured = await pending;
+  assert.equal(measured.failedRequests, 1);
+  assert.equal(measured.attemptedRequests, 2);
+  assert.equal(measured.measuredBytes, 1000);
+  assert.equal(measured.mbps, .0008);
+  assert.equal(measured.peakStreams, 1, 'unready connections never become observed test streams');
+  assert.equal(measured.connections.observed, 1);
 });
 
 test('a ready WebSocket plus actual binary probe retains eight fixed streams with no HTTP downgrade', async () => {
